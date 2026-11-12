@@ -5426,7 +5426,10 @@ final class HRPBTests: XCTestCase {
                 let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
                 return (resp, Data(body.utf8))
             } else if path == "/api/reporting/team-report" {
-                let isTeam2 = query.contains("team_2") || query.contains("dGVhbV8y")
+                let isTeam2 = query.contains("team_2")
+                    || query.contains("dGVhbV8y")
+                    || query.contains("TEAM2")
+                    || query.contains("VEVBTTI")
                 if isTeam2 && query.contains("from=") {
                     // Simulate server returning 400 INVALID_FILTER when team_2 has 0 new recruits in filtered period
                     let errBody = #"{"ok":false,"error":{"code":"INVALID_FILTER","message":"No rows in period"}}"#

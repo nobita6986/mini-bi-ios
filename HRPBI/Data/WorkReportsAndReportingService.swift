@@ -1280,6 +1280,9 @@ public final class WorkReportsAndReportingService {
             }
         }
 
+        if cleanRaw.lowercased().hasPrefix("team.") || cleanRaw.lowercased().hasPrefix("team:") {
+            appendCandidate(decoded)
+        }
         appendCandidate(dynamicMap[cleanRaw.lowercased()])
         appendCandidate(dynamicMap[decoded.lowercased()])
         if !cleanDisp.isEmpty {
