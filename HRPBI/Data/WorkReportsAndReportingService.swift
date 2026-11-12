@@ -1442,6 +1442,12 @@ public final class WorkReportsAndReportingService {
 
     public static func decodeTeamBucketCode(_ rawTeamCodeOrBucketKey: String) -> String {
         let trimmed = rawTeamCodeOrBucketKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("team:") {
+            let stripped = String(trimmed.dropFirst("team:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stripped.isEmpty {
+                return stripped
+            }
+        }
         guard trimmed.hasPrefix("team.") else { return trimmed }
         var b64 = String(trimmed.dropFirst("team.".count))
             .replacingOccurrences(of: "-", with: "+")
