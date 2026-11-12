@@ -3005,9 +3005,9 @@ public final class WorkReportsAndReportingService {
             for page in 1...10 {
                 let res = await repo.fetchWorkers(
                     scope: sc,
+                    cursor: cursor,
                     page: page,
-                    pageSize: 100,
-                    cursor: cursor
+                    pageSize: 100
                 )
                 switch res {
                 case .success(let wData, let status):
@@ -3118,7 +3118,7 @@ public final class WorkReportsAndReportingService {
                 return lhs.value.display < rhs.value.display
             }
 
-            for (idx, entry) in sortedTeamEntries.enumerated() {
+            for entry in sortedTeamEntries {
                 let bKey = entry.key
                 let bDisplay = entry.value.display
                 let bRows = entry.value.rows
@@ -3143,7 +3143,7 @@ public final class WorkReportsAndReportingService {
                 )
                 legacyTeams.append(
                     TeamSummaryRow(
-                        teamId: idx + 1,
+                        id: bKey,
                         teamCode: bKey,
                         teamName: bDisplay,
                         leaderName: "",
@@ -3151,8 +3151,9 @@ public final class WorkReportsAndReportingService {
                         totalWorkers: bRows.count,
                         activeWorkers: reportSnap.workingCount ?? 0,
                         inactiveWorkers: reportSnap.leftCount ?? 0,
-                        newWorkersInPeriod: isPeriodFiltered ? bRows.count : 0,
-                        retentionRate: bRows.isEmpty ? 0 : (Double(reportSnap.workingCount ?? 0) * 100.0 / Double(bRows.count))
+                        newWorkers: isPeriodFiltered ? bRows.count : 0,
+                        activeRatePct: bRows.isEmpty ? 0.0 : (Double(reportSnap.workingCount ?? 0) * 100.0 / Double(bRows.count)),
+                        members: []
                     )
                 )
             }
@@ -3165,10 +3166,10 @@ public final class WorkReportsAndReportingService {
                 activeCount: snapshot.workingCount,
                 inactiveCount: snapshot.leftCount,
                 interviewCount: snapshot.waitingCount,
-                newInPeriodCount: isPeriodFiltered ? snapshot.totalProfiles : 0,
-                leftInPeriodCount: isPeriodFiltered ? snapshot.leftCount : 0,
-                retentionRatePercent: snapshot.workingRatePct ?? 0,
-                activeProjectCount: snapshot.projectCount
+                newCount: isPeriodFiltered ? snapshot.totalProfiles : 0,
+                resignedInPeriodCount: isPeriodFiltered ? snapshot.leftCount : 0,
+                retentionRate: snapshot.workingRatePct ?? 0.0,
+                turnoverRate: snapshot.totalProfiles > 0 ? (Double(snapshot.leftCount) * 100.0 / Double(snapshot.totalProfiles)) : 0.0
             )
         )
 
