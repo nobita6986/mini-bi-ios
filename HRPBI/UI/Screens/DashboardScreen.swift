@@ -6,7 +6,6 @@ import SwiftUI
 public struct DashboardScreen: View {
     @ObservedObject var viewModel: MiniBiViewModel
     @Namespace private var dashboardTabNamespace
-    @State private var visibleProjectsCount: Int = 10
 
     public init(viewModel: MiniBiViewModel) {
         self.viewModel = viewModel
@@ -108,9 +107,9 @@ public struct DashboardScreen: View {
                     if viewModel.isLoadingDashboard && !hasLoadedAnyOverviewData {
                         dashboardSkeletonPlaceholder(theme: theme, activeTab: activeTab)
                     } else if activeTab == .teamReport {
-                        teamReportSection
+                        teamReportSection(theme: theme)
                     } else {
-                        overviewSection
+                        overviewSection(theme: theme)
                     }
                 }
                 .padding(14)
@@ -139,83 +138,53 @@ public struct DashboardScreen: View {
     // MARK: - Skeleton Placeholder (Perceived Performance Law #1)
 
     private func dashboardSkeletonPlaceholder(theme: MiniBiThemePalette, activeTab: DashboardSubTab) -> some View {
-        Group {
-            if activeTab == .teamReport {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(0..<3, id: \.self) { _ in
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Nhóm Tuyển dụng Miền Bắc")
-                                        .font(.headline)
-                                    Text("Trưởng nhóm: Nguyễn Văn A · 8 thành viên")
-                                        .font(.caption)
-                                }
-                                Spacer()
-                                Text("84,5%")
-                                    .font(.caption.weight(.bold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(theme.primaryLight)
-                                    .clipShape(Capsule())
-                            }
-                            HrpSegmentedBar(activeCount: 160, inactiveCount: 30)
-                            HStack(spacing: 14) {
-                                Text("160 đang làm")
-                                    .font(.caption2)
-                                Text("30 nghỉ")
-                                    .font(.caption2)
-                                Spacer()
-                                Text("Tổng: 190")
-                                    .font(.caption2.weight(.bold))
-                            }
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Báo cáo tổng quát tuyển dụng")
+                    .font(.headline)
+                Text("Ngày dữ liệu: 12/11/2026 · Phạm vi: Toàn hệ thống")
+                    .font(.caption)
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    ForEach(0..<4, id: \.self) { _ in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("TỔNG HỒ SƠ")
+                                .font(.caption2.weight(.bold))
+                            Text("1.280 NLĐ")
+                                .font(.title3.weight(.heavy))
+                            Text("18 dự án · 24 người tuyển")
+                                .font(.caption2)
                         }
-                        .padding(14)
-                        .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
                     }
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 14) {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                        kpiCard(title: "Tổng nhân sự", value: "1.280", subtitle: "+48 mới", iconName: "person.3.fill", accentColor: theme.primary)
-                        kpiCard(title: "Đang làm việc", value: "1.045", subtitle: "Giữ chân 81,6%", iconName: "checkmark.seal.fill", accentColor: SemanticColors.successText)
-                        kpiCard(title: "Đã nghỉ việc", value: "185", subtitle: "Trong kỳ: 12", iconName: "person.crop.circle.badge.minus", accentColor: SemanticColors.dangerText)
-                        kpiCard(title: "Phỏng vấn / Chờ nhận", value: "50", subtitle: "Biến động 14,4%", iconName: "clock.badge.questionmark", accentColor: SemanticColors.warningText)
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Thống kê nhân sự theo Dự án")
-                                .font(.headline)
-                            Spacer()
-                            Text("6 dự án")
-                                .font(.caption)
-                        }
-                        ForEach(0..<3, id: \.self) { _ in
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("Dự án Sản xuất Điện tử")
-                                        .font(.subheadline.weight(.semibold))
-                                    Spacer()
-                                    Text("320")
-                                        .font(.subheadline.weight(.bold))
-                                }
-                                HrpSegmentedBar(activeCount: 280, inactiveCount: 40)
-                                HStack(spacing: 12) {
-                                    Text("280 đang làm")
-                                        .font(.caption2)
-                                    Text("40 nghỉ")
-                                        .font(.caption2)
-                                }
-                            }
-                            .padding(10)
-                            .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
-                        }
-                    }
-                    .padding(14)
-                    .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
                 }
             }
+            .padding(14)
+            .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(activeTab == .teamReport ? "Đóng góp của thành viên nhóm" : "Tỷ trọng theo người tuyển")
+                    .font(.headline)
+                ForEach(0..<4, id: \.self) { _ in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Nguyễn Văn Tuyển Dụng")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text("33 NLĐ (14.2%)")
+                                .font(.caption.weight(.bold))
+                        }
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(theme.primary.opacity(0.25))
+                            .frame(height: 6)
+                    }
+                    .padding(10)
+                    .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
+                }
+            }
+            .padding(14)
+            .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
         }
         .redacted(reason: .placeholder)
     }
@@ -231,7 +200,6 @@ public struct DashboardScreen: View {
                     Button {
                         KeyboardDismissal.dismiss()
                         HapticsManager.selection()
-                        visibleProjectsCount = 10
                         viewModel.applyDatePreset(preset, reload: true)
                     } label: {
                         Text(preset.titleVi)
@@ -257,410 +225,830 @@ public struct DashboardScreen: View {
         .background(Color.white)
     }
 
-    // MARK: - 1. Overview Section
+    // MARK: - 1. Overview Section (`GeneralOverviewSection`)
 
-    private var overviewSection: some View {
+    @ViewBuilder
+    private func overviewSection(theme: MiniBiThemePalette) -> some View {
+        let snapshot = viewModel.generalOverviewSnapshot ?? fallbackOverviewSnapshotFromLegacy()
+        GeneralOverviewSection(
+            snapshot: snapshot,
+            theme: theme
+        )
+    }
+
+    private func fallbackOverviewSnapshotFromLegacy() -> GeneralOverviewSnapshot {
         let kpis = viewModel.generalOverview.kpis
-        let theme = viewModel.selectedTheme
-        let hasDateFilter = viewModel.selectedDatePreset != .all
-        let allProjects = viewModel.generalOverview.projects
-        let visibleProjects = Array(allProjects.prefix(visibleProjectsCount))
+        let isPeriodFiltered = viewModel.selectedDatePreset != .all
+        let workingRate: Double? = kpis.totalHeadcount > 0
+            ? (Double(kpis.activeCount) * 100.0 / Double(kpis.totalHeadcount))
+            : nil
+        return GeneralOverviewSnapshot(
+            asOfDate: LeaveContract.todayVietnamIsoDate(),
+            scopeDescription: "Toàn hệ thống",
+            totalProfiles: kpis.totalHeadcount,
+            workingCount: kpis.activeCount,
+            waitingCount: kpis.interviewCount,
+            leftCount: kpis.inactiveCount,
+            audienceKind: "all",
+            isPeriodFiltered: isPeriodFiltered,
+            workingRatePct: workingRate,
+            projectCount: max(viewModel.generalOverview.projectsTotal, viewModel.generalOverview.projects.count),
+            recruiterCount: viewModel.generalOverview.recruiters.count,
+            periodFromDate: isPeriodFiltered ? viewModel.filterStartDate : nil,
+            periodToDate: isPeriodFiltered ? viewModel.filterEndDate : nil
+        )
+    }
 
-        return VStack(alignment: .leading, spacing: 14) {
-            // KPI Cards Grid (2x2 with Tinted SF Symbol Circle + 27pt Heavy Numbers)
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                kpiCard(
-                    title: hasDateFilter ? "Tuyển mới trong kỳ" : "Tổng nhân sự",
-                    value: "\(kpis.totalHeadcount)",
-                    subtitle: hasDateFilter ? "Kỳ: \(viewModel.selectedDatePreset.titleVi)" : "+\(kpis.newCount) mới",
-                    iconName: "person.3.fill",
-                    accentColor: theme.primary
-                )
-                kpiCard(
-                    title: hasDateFilter ? "Vào làm trong kỳ" : "Đang làm việc",
-                    value: "\(kpis.activeCount)",
-                    subtitle: "Giữ chân \(WorkReportsContract.formatPercentVi(kpis.retentionRate))",
-                    iconName: "checkmark.seal.fill",
-                    accentColor: SemanticColors.successText
-                )
-                kpiCard(
-                    title: hasDateFilter ? "Nghỉ trong kỳ" : "Đã nghỉ việc",
-                    value: "\(kpis.inactiveCount)",
-                    subtitle: "Trong kỳ: \(kpis.resignedInPeriodCount)",
-                    iconName: "person.crop.circle.badge.minus",
-                    accentColor: SemanticColors.dangerText
-                )
-                kpiCard(
-                    title: "Phỏng vấn / Chờ nhận",
-                    value: "\(kpis.interviewCount)",
-                    subtitle: "Biến động \(WorkReportsContract.formatPercentVi(kpis.turnoverRate))",
-                    iconName: "clock.badge.questionmark",
-                    accentColor: SemanticColors.warningText
-                )
+    // MARK: - 2. Team Report Section (`TeamBucketPickerCard` + `TeamReportDetailCard`)
+
+    @ViewBuilder
+    private func teamReportSection(theme: MiniBiThemePalette) -> some View {
+        if !viewModel.canViewTeamReport {
+            VStack(spacing: 10) {
+                Image(systemName: "person.2.slash.fill")
+                    .font(.title2)
+                    .foregroundColor(SemanticColors.textMuted)
+                Text("Tài khoản hiện tại không quản lý nhóm tuyển dụng. Vui lòng xem số liệu cá nhân tại tab Tổng quát.")
+                    .font(.subheadline)
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(SemanticColors.textSecondary)
             }
-
-            // Projects Breakdown Card with HrpSegmentedBar & Load More
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text(hasDateFilter ? "Thống kê Dự án (\(viewModel.selectedDatePreset.titleVi))" : "Thống kê nhân sự theo Dự án")
-                        .font(.headline)
-                        .foregroundColor(SemanticColors.textPrimary)
-                    Spacer()
-                    Text("\(max(viewModel.generalOverview.projectsTotal, allProjects.count)) dự án")
-                        .font(.caption.weight(.semibold))
-                        .monospacedDigit()
-                        .contentTransition(.numericText())
-                        .foregroundColor(SemanticColors.textMuted)
+            .frame(maxWidth: .infinity)
+            .padding(24)
+            .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+        } else {
+            VStack(alignment: .leading, spacing: 14) {
+                if viewModel.teamScopeOptions.count > 1 {
+                    TeamBucketPickerCard(
+                        options: viewModel.teamScopeOptions,
+                        selectedKey: viewModel.selectedTeamBucketKey,
+                        theme: theme
+                    ) { bucketKey in
+                        HapticsManager.selection()
+                        Task { await viewModel.loadTeamReport(bucketKey) }
+                    }
                 }
 
-                if allProjects.isEmpty {
-                    Text("Chưa có dữ liệu dự án trong kỳ đã chọn.")
-                        .font(.subheadline)
-                        .foregroundColor(SemanticColors.textMuted)
-                        .padding(.vertical, 8)
+                if let teamErr = viewModel.teamReportErrorMessage, !teamErr.isEmpty, !viewModel.isLoadingTeamReport {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(SemanticColors.dangerText)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Không tải được báo cáo nhóm")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundColor(SemanticColors.dangerText)
+                            Text(teamErr)
+                                .font(.caption)
+                                .foregroundColor(SemanticColors.textSecondary)
+                        }
+                        Spacer()
+                        if let key = viewModel.selectedTeamBucketKey {
+                            Button("Thử lại") {
+                                HapticsManager.lightImpact()
+                                Task { await viewModel.loadTeamReport(key) }
+                            }
+                            .font(.caption.weight(.bold))
+                            .foregroundColor(theme.primary)
+                        }
+                    }
+                    .padding(12)
+                    .background(SemanticColors.dangerBg)
+                    .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous))
+                }
+
+                if viewModel.isLoadingTeamReport && viewModel.selectedTeamReport == nil {
+                    dashboardSkeletonPlaceholder(theme: theme, activeTab: .teamReport)
+                } else if let snapshot = viewModel.selectedTeamReport {
+                    TeamReportDetailCard(
+                        snapshot: snapshot,
+                        isPeriodFiltered: viewModel.selectedDatePreset != .all,
+                        isLoadingMoreDrillDown: viewModel.isLoadingMoreTeamDrillDown,
+                        theme: theme
+                    ) {
+                        Task { await viewModel.loadMoreTeamDrillDown() }
+                    }
+                    .id(snapshot.bucketKey)
                 } else {
-                    LazyVStack(spacing: 8) {
-                        ForEach(visibleProjects) { proj in
-                            let retentionPct: Double = proj.totalCount > 0
-                                ? (Double(proj.activeCount) * 100.0 / Double(proj.totalCount))
-                                : 0
-                            VStack(alignment: .leading, spacing: 7) {
-                                // Row 1: Project Name left · Total right (+New badge if any)
-                                HStack(spacing: 6) {
-                                    Text(proj.projectName)
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundColor(SemanticColors.textPrimary)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    if proj.newCount > 0 {
-                                        Text("+\(proj.newCount) mới")
-                                            .font(.caption2.weight(.bold))
-                                            .monospacedDigit()
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(SemanticColors.infoBg)
-                                            .foregroundColor(SemanticColors.infoText)
-                                            .clipShape(Capsule())
-                                    }
-                                    Text("\(proj.totalCount)")
-                                        .font(.subheadline.weight(.bold))
-                                        .monospacedDigit()
-                                        .contentTransition(.numericText())
-                                        .foregroundColor(theme.primary)
-                                }
-
-                                // Row 2: Visual Segmented Bar
-                                HrpSegmentedBar(
-                                    activeCount: proj.activeCount,
-                                    inactiveCount: proj.inactiveCount
-                                )
-
-                                // Row 3: Colored Dots + Retention %
-                                HStack(spacing: 12) {
-                                    HStack(spacing: 4) {
-                                        Circle()
-                                            .fill(SemanticColors.successText)
-                                            .frame(width: 6, height: 6)
-                                        Text("\(proj.activeCount) đang làm")
-                                            .font(.caption2.weight(.medium))
-                                            .monospacedDigit()
-                                            .foregroundColor(SemanticColors.textSecondary)
-                                    }
-                                    HStack(spacing: 4) {
-                                        Circle()
-                                            .fill(SemanticColors.dangerText.opacity(0.85))
-                                            .frame(width: 6, height: 6)
-                                        Text("\(proj.inactiveCount) nghỉ")
-                                            .font(.caption2.weight(.medium))
-                                            .monospacedDigit()
-                                            .foregroundColor(SemanticColors.textSecondary)
-                                    }
-                                    Spacer()
-                                    Text(WorkReportsContract.formatPercentVi(retentionPct))
-                                        .font(.caption2.weight(.bold))
-                                        .monospacedDigit()
-                                        .foregroundColor(SemanticColors.successText)
-                                }
-                            }
-                            .padding(11)
-                            .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
-                        }
+                    VStack(spacing: 8) {
+                        Image(systemName: "person.3.fill")
+                            .font(.largeTitle)
+                            .foregroundColor(SemanticColors.textMuted)
+                        Text("Chưa có dữ liệu báo cáo theo nhóm.")
+                            .font(.subheadline)
+                            .foregroundColor(SemanticColors.textSecondary)
                     }
+                    .frame(maxWidth: .infinity)
+                    .padding(24)
+                    .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+                }
+            }
+        }
+    }
+}
 
-                    if allProjects.count > visibleProjectsCount {
-                        HrpLoadMoreButton(
-                            title: "Xem thêm dự án",
-                            loadedCount: visibleProjects.count,
-                            totalCount: allProjects.count,
-                            isLoading: false,
-                            theme: theme
-                        ) {
-                            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                                visibleProjectsCount += 10
-                            }
-                        }
+// MARK: - Formatting Helpers for Dashboard Reporting
+
+private enum DashboardFormatters {
+    static func formatDateVi(_ raw: String?) -> String {
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "—" }
+        let prefix10 = String(trimmed.prefix(10))
+        let parts = prefix10.split(separator: "-")
+        if parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2 {
+            return "\(parts[2])/\(parts[1])/\(parts[0])"
+        }
+        return prefix10
+    }
+
+    static func formatPct(_ pct: Double?) -> String {
+        guard let pct else { return "0.0%" }
+        return String(format: "%.1f%%", pct)
+    }
+
+    static func formatDecimalOne(_ value: Double?) -> String {
+        guard let value else { return "0" }
+        if abs(value.rounded() - value) < 0.05 {
+            return "\(Int(value.rounded()))"
+        }
+        return String(format: "%.1f", value)
+    }
+
+    static func formatSigned(_ value: Int) -> String {
+        if value > 0 { return "+\(value)" }
+        return "\(value)"
+    }
+}
+
+// MARK: - 1. GeneralOverviewSection (`Tổng quát`)
+
+private struct GeneralOverviewSection: View {
+    let snapshot: GeneralOverviewSnapshot
+    let theme: MiniBiThemePalette
+
+    private var headerSubtitle: String {
+        let scopeText = snapshot.scopeDescription.isEmpty ? "Toàn hệ thống" : snapshot.scopeDescription
+        if snapshot.isPeriodFiltered,
+           let from = snapshot.periodFromDate, !from.isEmpty,
+           let to = snapshot.periodToDate, !to.isEmpty {
+            return "Kỳ lọc: \(DashboardFormatters.formatDateVi(from)) - \(DashboardFormatters.formatDateVi(to)) · Phạm vi: \(scopeText)"
+        }
+        let dateText = snapshot.asOfDate.isEmpty
+            ? DashboardFormatters.formatDateVi(LeaveContract.todayVietnamIsoDate())
+            : DashboardFormatters.formatDateVi(snapshot.asOfDate)
+        return "Ngày dữ liệu: \(dateText) · Phạm vi: \(scopeText)"
+    }
+
+    private var nonPeriodTotalSubtitle: String {
+        var scopeParts: [String] = []
+        if let teamTotal = snapshot.teamTotal {
+            scopeParts.append("Nhóm: \(teamTotal)")
+        }
+        if let managedTotal = snapshot.managedTotal {
+            scopeParts.append("QLDA: \(managedTotal)")
+        }
+        if let recruitedTotal = snapshot.recruitedTotal {
+            scopeParts.append("Tôi tuyển: \(recruitedTotal)")
+        }
+        if !scopeParts.isEmpty {
+            return scopeParts.joined(separator: " · ")
+        }
+        return "\(snapshot.projectCount) dự án · \(snapshot.recruiterCount) người tuyển"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Main Summary Card
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Báo cáo tổng quát tuyển dụng")
+                        .font(.headline)
+                        .foregroundColor(SemanticColors.textPrimary)
+                    Text(headerSubtitle)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundColor(SemanticColors.textSecondary)
+                }
+
+                // 2x2 KPI Grid
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    if snapshot.isPeriodFiltered && snapshot.audienceKind == "all" {
+                        overviewMetricTile(
+                            label: "TUYỂN MỚI TRONG KỲ",
+                            value: "\(snapshot.totalProfiles) NLĐ",
+                            subtitle: "\(snapshot.projectCount) dự án · \(snapshot.recruiterCount) người tuyển",
+                            accentColor: theme.primary
+                        )
+                        overviewMetricTile(
+                            label: "VÀO LÀM TRONG KỲ",
+                            value: "\(snapshot.workingCount) NLĐ",
+                            subtitle: {
+                                let closingW = snapshot.closingWorkingCount ?? snapshot.workingCount
+                                let rateStr = DashboardFormatters.formatPct(snapshot.workingRatePct)
+                                return "Đang làm cuối kỳ: \(closingW) (\(rateStr))"
+                            }(),
+                            accentColor: SemanticColors.successText
+                        )
+                        overviewMetricTile(
+                            label: "CHỜ VIỆC TRONG KỲ",
+                            value: "\(snapshot.waitingCount) NLĐ",
+                            subtitle: "Chờ việc cuối kỳ: \(snapshot.closingWaitingCount ?? snapshot.waitingCount) NLĐ",
+                            accentColor: SemanticColors.warningText
+                        )
+                        overviewMetricTile(
+                            label: "NGHỈ VIỆC TRONG KỲ",
+                            value: "\(snapshot.leftCount) NLĐ",
+                            subtitle: {
+                                let net = snapshot.periodNetOnChange ?? (snapshot.workingCount - snapshot.leftCount)
+                                return "Biến động đang làm: \(DashboardFormatters.formatSigned(net)) NLĐ"
+                            }(),
+                            accentColor: SemanticColors.dangerText
+                        )
+                    } else {
+                        overviewMetricTile(
+                            label: "TỔNG HỒ SƠ",
+                            value: "\(snapshot.totalProfiles) NLĐ",
+                            subtitle: nonPeriodTotalSubtitle,
+                            accentColor: theme.primary
+                        )
+                        overviewMetricTile(
+                            label: "ĐANG LÀM",
+                            value: "\(snapshot.workingCount) NLĐ",
+                            subtitle: "Tỷ lệ đang làm: \(DashboardFormatters.formatPct(snapshot.workingRatePct))",
+                            accentColor: SemanticColors.successText,
+                            badgePill: true
+                        )
+                        overviewMetricTile(
+                            label: "ĐANG CHỜ VIỆC",
+                            value: "\(snapshot.waitingCount) NLĐ",
+                            subtitle: "\(snapshot.projectCount) dự án có nhân sự",
+                            accentColor: SemanticColors.warningText
+                        )
+                        overviewMetricTile(
+                            label: "ĐÃ NGHỈ",
+                            value: "\(snapshot.leftCount) NLĐ",
+                            subtitle: snapshot.retention7dPct != nil
+                                ? "Giữ chân 7 ngày: \(DashboardFormatters.formatPct(snapshot.retention7dPct))"
+                                : "\(snapshot.recruiterCount) người tuyển",
+                            accentColor: SemanticColors.dangerText
+                        )
                     }
+                }
+
+                // Period Balance Banner when periodNewEpisodes is present on non-all/general view
+                if !(snapshot.isPeriodFiltered && snapshot.audienceKind == "all"),
+                   let newEp = snapshot.periodNewEpisodes {
+                    let fromVi = DashboardFormatters.formatDateVi(snapshot.periodFromDate)
+                    let toVi = DashboardFormatters.formatDateVi(snapshot.periodToDate)
+                    let onIn = snapshot.periodOnInflow ?? snapshot.workingCount
+                    let offIn = snapshot.periodOffInflow ?? snapshot.leftCount
+                    let net = snapshot.periodNetOnChange ?? (onIn - offIn)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Biến động trong kỳ (\(fromVi) – \(toVi))")
+                            .font(.caption.weight(.bold))
+                            .monospacedDigit()
+                            .foregroundColor(theme.primary)
+                        Text("Tuyển mới: \(newEp) · Vào làm: \(onIn) · Nghỉ việc: \(offIn) · Tăng/giảm: \(DashboardFormatters.formatSigned(net))")
+                            .font(.caption2.weight(.medium))
+                            .monospacedDigit()
+                            .foregroundColor(SemanticColors.textSecondary)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(theme.primaryLight.opacity(0.65))
+                    .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous))
+                }
+
+                // 3-column Hiring Pace Strip when activeHiringDays > 0
+                if snapshot.activeHiringDays > 0 {
+                    HiringPaceStripView(
+                        activeHiringDays: snapshot.activeHiringDays,
+                        avgPerActiveDay: snapshot.avgPerActiveDay,
+                        peakDailyCount: snapshot.peakDailyCount,
+                        peakDateIso: snapshot.peakDateIso,
+                        theme: theme
+                    )
                 }
             }
             .padding(14)
             .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
 
-            // Recruiters & Managers Performance
-            if !viewModel.generalOverview.recruiters.isEmpty {
-                DashboardPersonPerformanceCard(
-                    title: hasDateFilter ? "Hiệu suất Người tuyển dụng (\(viewModel.selectedDatePreset.titleVi))" : "Hiệu suất Người tuyển dụng",
-                    rows: viewModel.generalOverview.recruiters,
+            // 1. Tỷ trọng theo người tuyển / Đóng góp thành viên nhóm
+            if !snapshot.byRecruiter.isEmpty {
+                BucketBreakdownCard(
+                    title: snapshot.audienceKind == "team" ? "Đóng góp thành viên nhóm" : "Tỷ trọng theo người tuyển",
+                    subtitle: "Phân bổ theo số lượng hồ sơ ghi nhận",
+                    items: snapshot.byRecruiter,
                     theme: theme
                 )
             }
-            if !viewModel.generalOverview.managers.isEmpty {
-                DashboardPersonPerformanceCard(
-                    title: hasDateFilter ? "Hiệu suất Theo Nhóm (\(viewModel.selectedDatePreset.titleVi))" : "Hiệu suất Quản lý dự án",
-                    rows: viewModel.generalOverview.managers,
+
+            // 2. Tỷ trọng theo dự án
+            if !snapshot.byProject.isEmpty {
+                let leadSub: String? = {
+                    guard let lead = snapshot.leadingProject ?? snapshot.byProject.first else { return nil }
+                    return "Dự án dẫn đầu: \(lead.display) (\(lead.count) NLĐ · \(DashboardFormatters.formatPct(lead.sharePct)))"
+                }()
+                BucketBreakdownCard(
+                    title: "Tỷ trọng theo dự án",
+                    subtitle: leadSub,
+                    items: snapshot.byProject,
+                    theme: theme
+                )
+            }
+
+            // 3. Cơ cấu theo nhóm tuyển dụng / Cơ cấu theo loại hình lao động
+            if !snapshot.bySecondaryGroup.isEmpty {
+                BucketBreakdownCard(
+                    title: snapshot.secondaryGroupTitle.isEmpty ? "Cơ cấu theo nhóm tuyển dụng" : snapshot.secondaryGroupTitle,
+                    subtitle: nil,
+                    items: snapshot.bySecondaryGroup,
+                    theme: theme
+                )
+            }
+
+            // 4. Cơ cấu nguồn tuyển (HRP / Vendor)
+            if !snapshot.byProvider.isEmpty {
+                BucketBreakdownCard(
+                    title: "Cơ cấu nguồn tuyển (HRP / Vendor)",
+                    subtitle: nil,
+                    items: snapshot.byProvider,
                     theme: theme
                 )
             }
         }
     }
 
-    // MARK: - 2. Team Report Section
-
-    private var teamReportSection: some View {
-        let teams = viewModel.teamReport.teams
-        let theme = viewModel.selectedTheme
-
-        return VStack(alignment: .leading, spacing: 12) {
-            if teams.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "person.3.fill")
-                        .font(.largeTitle)
-                        .foregroundColor(SemanticColors.textMuted)
-                    Text("Chưa có dữ liệu báo cáo theo nhóm.")
-                        .font(.subheadline)
-                        .foregroundColor(SemanticColors.textSecondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(24)
-                .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
-            } else {
-                LazyVStack(spacing: 12) {
-                    ForEach(teams) { team in
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(team.teamName)
-                                        .font(.headline)
-                                        .foregroundColor(SemanticColors.textPrimary)
-                                    if !team.leaderName.isEmpty {
-                                        Text("Trưởng nhóm: \(team.leaderName) · \(team.memberCount) thành viên")
-                                            .font(.caption)
-                                            .monospacedDigit()
-                                            .foregroundColor(SemanticColors.textSecondary)
-                                    }
-                                }
-                                Spacer()
-                                Text(WorkReportsContract.formatPercentVi(team.activeRatePct))
-                                    .font(.caption.weight(.bold))
-                                    .monospacedDigit()
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(theme.primaryLight)
-                                    .foregroundColor(theme.primary)
-                                    .clipShape(Capsule())
-                            }
-
-                            HrpSegmentedBar(
-                                activeCount: team.activeWorkers,
-                                inactiveCount: team.inactiveWorkers
-                            )
-
-                            HStack(spacing: 14) {
-                                HStack(spacing: 4) {
-                                    Circle()
-                                        .fill(SemanticColors.successText)
-                                        .frame(width: 6, height: 6)
-                                    Text("\(team.activeWorkers) đang làm")
-                                        .font(.caption2.weight(.medium))
-                                        .monospacedDigit()
-                                        .foregroundColor(SemanticColors.textSecondary)
-                                }
-                                HStack(spacing: 4) {
-                                    Circle()
-                                        .fill(SemanticColors.dangerText.opacity(0.85))
-                                        .frame(width: 6, height: 6)
-                                    Text("\(team.inactiveWorkers) nghỉ")
-                                        .font(.caption2.weight(.medium))
-                                        .monospacedDigit()
-                                        .foregroundColor(SemanticColors.textSecondary)
-                                }
-                                if team.newWorkers > 0 {
-                                    Text("+\(team.newWorkers) mới")
-                                        .font(.caption2.weight(.bold))
-                                        .monospacedDigit()
-                                        .foregroundColor(SemanticColors.infoText)
-                                }
-                                Spacer()
-                                Text("Tổng: \(team.totalWorkers)")
-                                    .font(.caption2.weight(.bold))
-                                    .monospacedDigit()
-                                    .foregroundColor(SemanticColors.textPrimary)
-                            }
-
-                            if !team.members.isEmpty {
-                                Divider()
-                                ForEach(team.members) { member in
-                                    HStack {
-                                        Text(member.name)
-                                            .font(.caption.weight(.medium))
-                                        Spacer()
-                                        Text("Đang làm \(member.activeCount)/\(member.totalCount)")
-                                            .font(.caption)
-                                            .monospacedDigit()
-                                            .foregroundColor(SemanticColors.textSecondary)
-                                    }
-                                }
-                            }
-                        }
-                        .padding(14)
-                        .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: - Helper Cards
-
-    private func kpiCard(
-        title: String,
+    private func overviewMetricTile(
+        label: String,
         value: String,
         subtitle: String,
-        iconName: String = "chart.bar.fill",
-        accentColor: Color
+        accentColor: Color,
+        badgePill: Bool = false
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                ZStack {
-                    Circle()
-                        .fill(accentColor.opacity(0.14))
-                        .frame(width: 28, height: 28)
-                    Image(systemName: iconName)
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(accentColor)
-                }
-                Text(title)
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(SemanticColors.textSecondary)
-                    .lineLimit(1)
-            }
-            Text(value)
-                .font(.system(size: 27, weight: .heavy, design: .rounded))
-                .monospacedDigit()
-                .contentTransition(.numericText())
-                .animation(.default, value: value)
-                .foregroundColor(accentColor)
-            Text(subtitle)
-                .font(.caption2.weight(.medium))
-                .monospacedDigit()
-                .contentTransition(.numericText())
-                .foregroundColor(SemanticColors.textMuted)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .foregroundColor(SemanticColors.textSecondary)
                 .lineLimit(1)
+            Text(value)
+                .font(.system(size: 22, weight: .heavy, design: .rounded))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .foregroundColor(accentColor)
+                .lineLimit(1)
+            if badgePill {
+                Text(subtitle)
+                    .font(.caption2.weight(.semibold))
+                    .monospacedDigit()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(SemanticColors.successBg)
+                    .foregroundColor(SemanticColors.successText)
+                    .clipShape(Capsule())
+                    .lineLimit(1)
+            } else {
+                Text(subtitle)
+                    .font(.caption2.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundColor(SemanticColors.textMuted)
+                    .lineLimit(2)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+        .frame(maxWidth: .infinity, minHeight: 86, alignment: .topLeading)
+        .padding(12)
+        .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
     }
 }
 
-private struct DashboardPersonPerformanceCard: View {
+// MARK: - 3-Column Hiring Pace Strip
+
+private struct HiringPaceStripView: View {
+    let activeHiringDays: Int
+    let avgPerActiveDay: Double?
+    let peakDailyCount: Int?
+    let peakDateIso: String?
+    let theme: MiniBiThemePalette
+
+    var body: some View {
+        HStack(spacing: 8) {
+            paceCell(
+                title: "Ngày có tuyển",
+                value: "\(activeHiringDays) ngày",
+                sub: nil
+            )
+            paceCell(
+                title: "TB / ngày có số",
+                value: "\(DashboardFormatters.formatDecimalOne(avgPerActiveDay)) NLĐ",
+                sub: nil
+            )
+            paceCell(
+                title: "Đỉnh / ngày",
+                value: "\(peakDailyCount ?? 0) NLĐ",
+                sub: (peakDateIso?.isEmpty == false) ? DashboardFormatters.formatDateVi(peakDateIso) : nil
+            )
+        }
+    }
+
+    private func paceCell(title: String, value: String, sub: String?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption2)
+                .foregroundColor(SemanticColors.textSecondary)
+                .lineLimit(1)
+            Text(value)
+                .font(.footnote.weight(.bold))
+                .monospacedDigit()
+                .foregroundColor(theme.primary)
+                .lineLimit(1)
+            if let sub, !sub.isEmpty {
+                Text(sub)
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundColor(SemanticColors.textMuted)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(9)
+        .background(Color(hex: 0xF8FAFC))
+        .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusSM, style: .continuous))
+    }
+}
+
+// MARK: - BucketBreakdownCard (`<Tên mục>` — `<count> NLĐ (<sharePct>%)` + 6pt bar)
+
+private struct BucketBreakdownCard: View {
     let title: String
-    let rows: [PersonPerformanceRow]
+    let subtitle: String?
+    let items: [BiBucketItem]
     let theme: MiniBiThemePalette
     @State private var visibleCount: Int = 10
 
     var body: some View {
-        let visibleRows = Array(rows.prefix(visibleCount))
+        let visibleItems = Array(items.prefix(visibleCount))
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(title)
-                    .font(.headline)
-                    .foregroundColor(SemanticColors.textPrimary)
-                Spacer()
-                Text("\(rows.count)")
-                    .font(.caption.weight(.semibold))
-                    .monospacedDigit()
-                    .foregroundColor(SemanticColors.textMuted)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundColor(SemanticColors.textPrimary)
+                    Spacer()
+                    Text("\(items.count) mục")
+                        .font(.caption.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundColor(SemanticColors.textMuted)
+                }
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundColor(SemanticColors.textSecondary)
+                }
             }
 
             LazyVStack(spacing: 8) {
-                ForEach(visibleRows) { row in
+                ForEach(visibleItems) { item in
+                    let clampedRatio = min(1.0, max(0.0, item.sharePct / 100.0))
                     VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(row.name)
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(item.display)
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundColor(SemanticColors.textPrimary)
                                 .lineLimit(1)
                             Spacer()
-                            Text("\(row.totalCount)")
-                                .font(.subheadline.weight(.bold))
+                            Text("\(item.count) NLĐ (\(DashboardFormatters.formatPct(item.sharePct)))")
+                                .font(.caption.weight(.bold))
                                 .monospacedDigit()
                                 .contentTransition(.numericText())
                                 .foregroundColor(theme.primary)
                         }
 
-                        HrpSegmentedBar(
-                            activeCount: row.activeCount,
-                            inactiveCount: row.inactiveCount
-                        )
-
-                        HStack(spacing: 12) {
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(SemanticColors.successText)
-                                    .frame(width: 6, height: 6)
-                                Text("\(row.activeCount) đang làm")
-                                    .font(.caption2.weight(.medium))
-                                    .monospacedDigit()
-                                    .foregroundColor(SemanticColors.textSecondary)
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .fill(Color(hex: 0xE2E8F0))
+                                    .frame(height: 6)
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .fill(theme.primary)
+                                    .frame(
+                                        width: max(item.count > 0 ? 4 : 0, geo.size.width * clampedRatio),
+                                        height: 6
+                                    )
                             }
-                            HStack(spacing: 4) {
-                                Circle()
-                                    .fill(SemanticColors.dangerText.opacity(0.85))
-                                    .frame(width: 6, height: 6)
-                                Text("\(row.inactiveCount) nghỉ")
-                                    .font(.caption2.weight(.medium))
-                                    .monospacedDigit()
-                                    .foregroundColor(SemanticColors.textSecondary)
-                            }
-                            Spacer()
-                            Text(WorkReportsContract.formatPercentVi(row.activeRatePct))
-                                .font(.caption2.weight(.bold))
-                                .monospacedDigit()
-                                .contentTransition(.numericText())
-                                .foregroundColor(SemanticColors.successText)
                         }
+                        .frame(height: 6)
                     }
                     .padding(10)
                     .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
                 }
             }
 
-            if rows.count > visibleCount {
+            if items.count > visibleCount {
                 HrpLoadMoreButton(
-                    title: "Xem thêm",
-                    loadedCount: visibleRows.count,
-                    totalCount: rows.count,
+                    title: "Xem thêm (\(items.count - visibleCount) mục)",
+                    loadedCount: visibleItems.count,
+                    totalCount: items.count,
                     isLoading: false,
                     theme: theme
                 ) {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                        visibleCount += 10
+                        visibleCount += 15
                     }
                 }
             }
         }
         .padding(14)
         .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+    }
+}
+
+// MARK: - 2. TeamBucketPickerCard & TeamReportDetailCard (`Theo nhóm`)
+
+private struct TeamBucketPickerCard: View {
+    let options: [BiBucketItem]
+    let selectedKey: String?
+    let theme: MiniBiThemePalette
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Chọn nhóm tuyển dụng")
+                .font(.subheadline.weight(.bold))
+                .foregroundColor(SemanticColors.textPrimary)
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 135), spacing: 8)], spacing: 8) {
+                ForEach(options) { bucket in
+                    let isSelected = selectedKey?.caseInsensitiveCompare(bucket.key) == .orderedSame
+                    let chipTitle = bucket.count > 0
+                        ? "\(bucket.display) (\(bucket.count))"
+                        : bucket.display
+                    Button {
+                        onSelect(bucket.key)
+                    } label: {
+                        Text(chipTitle)
+                            .font(.caption.weight(isSelected ? .bold : .medium))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity)
+                            .background(isSelected ? theme.primary : SemanticColors.surfaceMuted)
+                            .foregroundColor(isSelected ? .white : SemanticColors.textPrimary)
+                            .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusSM, style: .continuous))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(14)
+        .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+    }
+}
+
+private struct TeamReportDetailCard: View {
+    let snapshot: TeamReportSnapshot
+    let isPeriodFiltered: Bool
+    let isLoadingMoreDrillDown: Bool
+    let theme: MiniBiThemePalette
+    let onLoadMoreFromServer: () -> Void
+    @State private var visibleDetailCount: Int = 20
+
+    private var totalRecruitedSubtitle: String {
+        if let working = snapshot.workingCount, !isPeriodFiltered {
+            let waiting = snapshot.waitingCount ?? 0
+            let left = snapshot.leftCount ?? 0
+            return "Đang làm: \(working) · Chờ: \(waiting) · Nghỉ: \(left)"
+        }
+        return "Tổng nhân sự tuyển ghi nhận của nhóm"
+    }
+
+    private var avgPerActiveDaySubtitle: String {
+        if snapshot.activeHiringDays > 0 {
+            if let peak = snapshot.peakDailyCount {
+                return "\(snapshot.activeHiringDays) ngày có tuyển · Đỉnh: \(peak)"
+            }
+            return "\(snapshot.activeHiringDays) ngày có tuyển"
+        }
+        return "Chưa phát sinh ngày tuyển"
+    }
+
+    var body: some View {
+        let visibleRows = Array(snapshot.rows.prefix(visibleDetailCount))
+
+        VStack(alignment: .leading, spacing: 14) {
+            // Team Header + 2x2 KPI Grid Card
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center, spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(theme.primaryLight)
+                            .frame(width: 36, height: 36)
+                        Image(systemName: "person.3.fill")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(theme.primary)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(snapshot.bucketDisplay)
+                            .font(.headline)
+                            .foregroundColor(SemanticColors.textPrimary)
+                        Text("Báo cáo hiệu suất nhóm tuyển dụng")
+                            .font(.caption)
+                            .foregroundColor(SemanticColors.textSecondary)
+                    }
+                    Spacer()
+                    Text("\(snapshot.totalRecruited) NLĐ")
+                        .font(.caption.weight(.bold))
+                        .monospacedDigit()
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(theme.primaryLight)
+                        .foregroundColor(theme.primary)
+                        .clipShape(Capsule())
+                }
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    teamKpiTile(
+                        label: "TỔNG TUYỂN NHÓM",
+                        value: "\(snapshot.totalRecruited) NLĐ",
+                        subtitle: totalRecruitedSubtitle,
+                        accentColor: theme.primary
+                    )
+                    teamKpiTile(
+                        label: "THÀNH VIÊN CÓ SỐ",
+                        value: "\(snapshot.activeRecruiterCount) người",
+                        subtitle: "Có phát sinh tuyển dụng",
+                        accentColor: SemanticColors.successText
+                    )
+                    teamKpiTile(
+                        label: "DỰ ÁN THAM GIA",
+                        value: "\(snapshot.activeProjectCount) dự án",
+                        subtitle: "Có nhân sự của nhóm",
+                        accentColor: SemanticColors.infoText
+                    )
+                    teamKpiTile(
+                        label: "TB / NGÀY CÓ SỐ",
+                        value: "\(DashboardFormatters.formatDecimalOne(snapshot.avgPerActiveDay)) NLĐ",
+                        subtitle: avgPerActiveDaySubtitle,
+                        accentColor: SemanticColors.warningText
+                    )
+                }
+            }
+            .padding(14)
+            .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+
+            // 1. Đóng góp của thành viên nhóm
+            if !snapshot.byRecruiter.isEmpty {
+                BucketBreakdownCard(
+                    title: "Đóng góp của thành viên nhóm",
+                    subtitle: "Xếp hạng theo số lượng NLĐ tuyển được trong nhóm",
+                    items: snapshot.byRecruiter,
+                    theme: theme
+                )
+            }
+
+            // 2. Theo dự án trong nhóm
+            if !snapshot.byProject.isEmpty {
+                BucketBreakdownCard(
+                    title: "Theo dự án trong nhóm",
+                    subtitle: nil,
+                    items: snapshot.byProject,
+                    theme: theme
+                )
+            }
+
+            // 3. Theo loại hình làm việc
+            if !snapshot.byEmployment.isEmpty {
+                BucketBreakdownCard(
+                    title: "Theo loại hình làm việc",
+                    subtitle: nil,
+                    items: snapshot.byEmployment,
+                    theme: theme
+                )
+            }
+
+            // 4. Theo nguồn tuyển (HRP / Vendor)
+            if !snapshot.byProvider.isEmpty {
+                BucketBreakdownCard(
+                    title: "Theo nguồn tuyển (HRP / Vendor)",
+                    subtitle: nil,
+                    items: snapshot.byProvider,
+                    theme: theme
+                )
+            }
+
+            // Chi tiết lượt tuyển trong nhóm
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Chi tiết lượt tuyển trong nhóm")
+                        .font(.headline)
+                        .foregroundColor(SemanticColors.textPrimary)
+                    Spacer()
+                    Text("\(snapshot.rows.count) dòng")
+                        .font(.caption.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundColor(SemanticColors.textMuted)
+                }
+
+                if snapshot.rows.isEmpty {
+                    Text("Chưa có lượt tuyển nào của nhóm trong phạm vi kỳ đang chọn.")
+                        .font(.subheadline)
+                        .foregroundColor(SemanticColors.textMuted)
+                        .padding(.vertical, 8)
+                } else {
+                    LazyVStack(spacing: 8) {
+                        ForEach(visibleRows) { row in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("\(row.projectDisplay) · \(row.recruiterDisplay)")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundColor(SemanticColors.textPrimary)
+                                    .lineLimit(1)
+                                Text("Ngày \(DashboardFormatters.formatDateVi(row.businessDate)) · \(row.providerTypeDisplay) · \(row.employmentTypeDisplay) · SL: \(row.recruitedCount)")
+                                    .font(.caption)
+                                    .monospacedDigit()
+                                    .foregroundColor(SemanticColors.textSecondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
+                        }
+                    }
+
+                    if snapshot.rows.count > visibleDetailCount {
+                        let remaining = snapshot.rows.count - visibleDetailCount
+                        Button {
+                            HapticsManager.selection()
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                                visibleDetailCount += 30
+                            }
+                        } label: {
+                            Text("Xem thêm (\(remaining) dòng)")
+                                .font(.caption.weight(.bold))
+                                .monospacedDigit()
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(theme.primaryLight)
+                                .foregroundColor(theme.primary)
+                                .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusSM, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if snapshot.nextCursor != nil {
+                        Button {
+                            HapticsManager.lightImpact()
+                            onLoadMoreFromServer()
+                        } label: {
+                            HStack(spacing: 8) {
+                                if isLoadingMoreDrillDown {
+                                    ProgressView()
+                                        .scaleEffect(0.85)
+                                }
+                                Text(isLoadingMoreDrillDown ? "Đang tải thêm..." : "Tải thêm từ máy chủ")
+                                    .font(.caption.weight(.bold))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(SemanticColors.surfaceMuted)
+                            .foregroundColor(theme.primary)
+                            .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusSM, style: .continuous))
+                        }
+                        .disabled(isLoadingMoreDrillDown)
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(14)
+            .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+        }
+    }
+
+    private func teamKpiTile(
+        label: String,
+        value: String,
+        subtitle: String,
+        accentColor: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.caption2.weight(.bold))
+                .foregroundColor(SemanticColors.textSecondary)
+                .lineLimit(1)
+            Text(value)
+                .font(.system(size: 21, weight: .heavy, design: .rounded))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .foregroundColor(accentColor)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(.caption2.weight(.medium))
+                .monospacedDigit()
+                .foregroundColor(SemanticColors.textMuted)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
+        .padding(12)
+        .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
     }
 }
 

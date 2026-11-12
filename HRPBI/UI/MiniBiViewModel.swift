@@ -76,8 +76,18 @@ public final class MiniBiViewModel: ObservableObject {
     @Published public var isLoadingDashboard: Bool = false
     @Published public var dashboardErrorMessage: String = ""
     @Published public var generalOverview: GeneralOverviewData = GeneralOverviewData()
+    @Published public var generalOverviewSnapshot: GeneralOverviewSnapshot? = nil
     @Published public var workforceDeepMetrics: WorkforceDeepMetricsData = WorkforceDeepMetricsData()
     @Published public var teamReport: TeamReportData = TeamReportData()
+    @Published public var teamScopeOptions: [BiBucketItem] = []
+    @Published public var selectedTeamBucketKey: String? = nil
+    public var lastSelectedTeamBucketKey: String? = nil
+    @Published public var selectedTeamReport: TeamReportSnapshot? = nil
+    @Published public var isLoadingTeamReport: Bool = false
+    @Published public var isLoadingMoreTeamDrillDown: Bool = false
+    @Published public var teamReportErrorMessage: String? = nil
+    @Published public var canViewTeamReport: Bool = true
+    private var scopedTeamReportsByKey: [String: TeamReportSnapshot] = [:]
     @Published public var duplicateCccdReport: DuplicateCccdReportData = DuplicateCccdReportData()
     @Published public var duplicateSearchQuery: String = ""
 
@@ -777,8 +787,18 @@ public final class MiniBiViewModel: ObservableObject {
         salaryAdvanceRequests = []
         salaryAdvancePmBadgeCount = 0
         generalOverview = GeneralOverviewData()
+        generalOverviewSnapshot = nil
         workforceDeepMetrics = WorkforceDeepMetricsData()
         teamReport = TeamReportData()
+        teamScopeOptions = []
+        selectedTeamBucketKey = nil
+        lastSelectedTeamBucketKey = nil
+        selectedTeamReport = nil
+        isLoadingTeamReport = false
+        isLoadingMoreTeamDrillDown = false
+        teamReportErrorMessage = nil
+        canViewTeamReport = true
+        scopedTeamReportsByKey = [:]
         duplicateCccdReport = DuplicateCccdReportData()
         isLoadingMoreDuplicateCccd = false
         cccdReviewItems = []
@@ -1083,10 +1103,47 @@ public final class MiniBiViewModel: ObservableObject {
     public func resetDashboardDisplayForFilterChange() {
         dashboardLoadGeneration &+= 1
         hasLoadedDashboardInSession = false
+        if let currentSelected = selectedTeamBucketKey, !currentSelected.isEmpty {
+            lastSelectedTeamBucketKey = currentSelected
+        }
+        generalOverviewSnapshot = nil
+        selectedTeamReport = nil
+        teamScopeOptions = []
+        teamReportErrorMessage = nil
+        isLoadingTeamReport = false
+        isLoadingMoreTeamDrillDown = false
+        scopedTeamReportsByKey = [:]
         generalOverview = GeneralOverviewData()
         teamReport = TeamReportData()
         dashboardErrorMessage = ""
         isLoadingDashboard = captureSessionToken() != nil
+    }
+
+    private static func selectDefaultTeamBucketKey(
+        from options: [BiBucketItem],
+        preferredKey: String?
+    ) -> String? {
+        guard !options.isEmpty else { return nil }
+        if let pref = preferredKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !pref.isEmpty,
+           let matched = options.first(where: { $0.key.caseInsensitiveCompare(pref) == .orderedSame }) {
+            return matched.key
+        }
+        if let firstValid = options.first(where: {
+            let k = $0.key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return !k.isEmpty && k != "unknown" && k != "__system_vendor__" && k != "team:__system_vendor__"
+        }) {
+            return firstValid.key
+        }
+        return options.first?.key
+    }
+
+    private var canCurrentUserManageTeamCatalog: Bool {
+        let perms = Set((currentUser?.permissions ?? []).map { $0.lowercased() })
+        return perms.contains("admin")
+            || perms.contains("team_manage")
+            || perms.contains("catalog_manage")
+            || perms.contains("user_manage")
     }
 
     public func setDashboardScope(_ scope: String, reload: Bool = true) {
@@ -1154,7 +1211,6 @@ public final class MiniBiViewModel: ObservableObject {
         let targetScope = dashboardScope
         let targetStart = filterStartDate
         let targetEnd = filterEndDate
-        let allowedScopes = currentUser?.safeAllowedWorkerTabs ?? []
         let dedupeKey = "dashboard:\(targetScope):\(targetStart):\(targetEnd)"
 
         await runDeduplicatedSessionTask(key: dedupeKey, force: force) { [weak self] token in
@@ -1163,63 +1219,255 @@ public final class MiniBiViewModel: ObservableObject {
             let loadGen = self.dashboardLoadGeneration
             self.isLoadingDashboard = true
             self.dashboardErrorMessage = ""
+            self.teamReportErrorMessage = nil
             defer {
                 if self.isSessionValid(token), self.dashboardLoadGeneration == loadGen {
                     self.isLoadingDashboard = false
                 }
             }
 
-            async let overviewTask = self.workReportsService.fetchGeneralOverview(
-                scope: targetScope,
-                allowedWorkerScopes: allowedScopes,
-                startDate: targetStart,
-                endDate: targetEnd
-            )
-            async let teamTask = self.workReportsService.fetchTeamReport(
-                allowedWorkerScopes: allowedScopes,
-                startDate: targetStart,
-                endDate: targetEnd
-            )
+            let user = self.currentUser
+            let hasAllScope = user?.hasScopeKind("all") == true
 
-            let overviewRes = await overviewTask
-            let teamRes = await teamTask
+            if hasAllScope {
+                self.canViewTeamReport = true
+                self.scopedTeamReportsByKey = [:]
+                let deepRes = await self.workReportsService.fetchWorkforceDeepDashboard(
+                    startDate: targetStart,
+                    endDate: targetEnd,
+                    canManageTeamCatalog: self.canCurrentUserManageTeamCatalog
+                )
+
+                guard !Task.isCancelled,
+                      self.isSessionValid(token),
+                      self.dashboardLoadGeneration == loadGen,
+                      self.dashboardScope == targetScope,
+                      self.filterStartDate == targetStart,
+                      self.filterEndDate == targetEnd else {
+                    return
+                }
+
+                if deepRes.isCancelledRequest {
+                    return
+                }
+
+                switch deepRes {
+                case .success(let data, _):
+                    self.generalOverviewSnapshot = data.snapshot
+                    self.teamScopeOptions = data.teamOptions
+                    self.generalOverview = data.legacyOverview
+                    self.teamReport = data.legacyTeamReport
+
+                    let defaultTeamKey = Self.selectDefaultTeamBucketKey(
+                        from: data.teamOptions,
+                        preferredKey: self.lastSelectedTeamBucketKey ?? self.selectedTeamBucketKey
+                    )
+                    self.selectedTeamBucketKey = defaultTeamKey
+                    if let defaultTeamKey, !defaultTeamKey.isEmpty {
+                        self.lastSelectedTeamBucketKey = defaultTeamKey
+                        await self.performLoadTeamReport(
+                            bucketKey: defaultTeamKey,
+                            startDate: targetStart,
+                            endDate: targetEnd,
+                            token: token,
+                            loadGen: loadGen
+                        )
+                    } else {
+                        self.selectedTeamReport = nil
+                    }
+                case .failure(let message, _, _, _):
+                    self.dashboardErrorMessage = message
+                }
+            } else if let user {
+                let scopedRes = await self.workReportsService.fetchScopedDashboardSnapshots(
+                    user: user,
+                    startDate: targetStart,
+                    endDate: targetEnd
+                )
+
+                guard !Task.isCancelled,
+                      self.isSessionValid(token),
+                      self.dashboardLoadGeneration == loadGen,
+                      self.dashboardScope == targetScope,
+                      self.filterStartDate == targetStart,
+                      self.filterEndDate == targetEnd else {
+                    return
+                }
+
+                if scopedRes.isCancelledRequest {
+                    return
+                }
+
+                switch scopedRes {
+                case .success(let data, _):
+                    self.canViewTeamReport = data.canViewTeamReport
+                    self.generalOverviewSnapshot = data.snapshot
+                    self.teamScopeOptions = data.teamOptions
+                    self.scopedTeamReportsByKey = data.teamReportsByKey
+                    self.generalOverview = data.legacyOverview
+                    self.teamReport = data.legacyTeamReport
+
+                    if data.canViewTeamReport {
+                        let defaultTeamKey = Self.selectDefaultTeamBucketKey(
+                            from: data.teamOptions,
+                            preferredKey: self.lastSelectedTeamBucketKey ?? self.selectedTeamBucketKey
+                        )
+                        self.selectedTeamBucketKey = defaultTeamKey
+                        if let defaultTeamKey {
+                            self.lastSelectedTeamBucketKey = defaultTeamKey
+                            self.selectedTeamReport = data.teamReportsByKey[defaultTeamKey]
+                        } else {
+                            self.selectedTeamReport = nil
+                        }
+                    } else {
+                        self.selectedTeamBucketKey = nil
+                        self.selectedTeamReport = nil
+                    }
+                case .failure(let message, _, _, _):
+                    self.dashboardErrorMessage = message
+                }
+            }
 
             guard !Task.isCancelled,
                   self.isSessionValid(token),
-                  self.dashboardLoadGeneration == loadGen,
-                  self.dashboardScope == targetScope,
-                  self.filterStartDate == targetStart,
-                  self.filterEndDate == targetEnd else {
+                  self.dashboardLoadGeneration == loadGen else {
                 return
-            }
-
-            if overviewRes.isCancelledRequest && teamRes.isCancelledRequest {
-                return
-            }
-
-            var firstError: String?
-            switch overviewRes {
-            case .success(let ov, _):
-                self.generalOverview = ov
-            case .failure(let message, _, _, _):
-                if !overviewRes.isCancelledRequest {
-                    firstError = message
-                }
-            }
-
-            switch teamRes {
-            case .success(let tm, _):
-                self.teamReport = tm
-            case .failure(let message, _, _, _):
-                if !teamRes.isCancelledRequest, firstError == nil, self.selectedDashboardSubTab == .teamReport {
-                    firstError = message
-                }
-            }
-
-            if let firstError, !firstError.isEmpty {
-                self.dashboardErrorMessage = firstError
             }
             self.hasLoadedDashboardInSession = true
+        }
+    }
+
+    public func loadTeamReport(_ bucketKey: String) async {
+        guard let token = captureSessionToken() else { return }
+        let cleanKey = bucketKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanKey.isEmpty else { return }
+        selectedTeamBucketKey = cleanKey
+        lastSelectedTeamBucketKey = cleanKey
+        teamReportErrorMessage = nil
+
+        guard canViewTeamReport else {
+            selectedTeamReport = nil
+            return
+        }
+
+        if currentUser?.hasScopeKind("all") != true {
+            if let localSnap = scopedTeamReportsByKey[cleanKey] {
+                selectedTeamReport = localSnap
+                return
+            }
+        }
+
+        let loadGen = dashboardLoadGeneration
+        await performLoadTeamReport(
+            bucketKey: cleanKey,
+            startDate: filterStartDate,
+            endDate: filterEndDate,
+            token: token,
+            loadGen: loadGen
+        )
+    }
+
+    private func performLoadTeamReport(
+        bucketKey: String,
+        startDate: String,
+        endDate: String,
+        token: SessionRequestToken,
+        loadGen: Int64
+    ) async {
+        let knownHint = teamScopeOptions.first {
+            $0.key.caseInsensitiveCompare(bucketKey) == .orderedSame
+        }
+        isLoadingTeamReport = true
+        teamReportErrorMessage = nil
+        defer {
+            if isSessionValid(token), dashboardLoadGeneration == loadGen {
+                isLoadingTeamReport = false
+            }
+        }
+
+        let res = await workReportsService.fetchTeamReportSnapshot(
+            bucketKeyOrTeamCode: bucketKey,
+            knownBucketHint: knownHint,
+            fromDate: startDate,
+            toDate: endDate,
+            limit: 25,
+            canManageTeamCatalog: canCurrentUserManageTeamCatalog
+        )
+
+        guard !Task.isCancelled,
+              isSessionValid(token),
+              dashboardLoadGeneration == loadGen,
+              selectedTeamBucketKey?.caseInsensitiveCompare(bucketKey) == .orderedSame else {
+            return
+        }
+
+        switch res {
+        case .success(let snapshot, _):
+            selectedTeamReport = snapshot
+            teamReportErrorMessage = nil
+        case .failure(let message, _, _, _):
+            if !res.isCancelledRequest {
+                teamReportErrorMessage = message
+            }
+        }
+    }
+
+    public func loadMoreTeamDrillDown() async {
+        guard let token = captureSessionToken(),
+              let currentReport = selectedTeamReport,
+              !isLoadingTeamReport,
+              !isLoadingMoreTeamDrillDown,
+              let cursor = currentReport.nextCursor,
+              !cursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        let targetBucketKey = currentReport.bucketKey
+        let targetStart = filterStartDate
+        let targetEnd = filterEndDate
+        let loadGen = dashboardLoadGeneration
+
+        isLoadingMoreTeamDrillDown = true
+        defer {
+            if isSessionValid(token), dashboardLoadGeneration == loadGen {
+                isLoadingMoreTeamDrillDown = false
+            }
+        }
+
+        let res = await workReportsService.fetchTeamDrillDownPage(
+            bucketKeyOrTeamCode: targetBucketKey,
+            cursor: cursor,
+            fromDate: targetStart,
+            toDate: targetEnd,
+            limit: 25,
+            canManageTeamCatalog: canCurrentUserManageTeamCatalog
+        )
+
+        guard !Task.isCancelled,
+              isSessionValid(token),
+              dashboardLoadGeneration == loadGen,
+              let activeReport = selectedTeamReport,
+              activeReport.bucketKey == targetBucketKey else {
+            return
+        }
+
+        switch res {
+        case .success(let pageData, _):
+            var seenIds = Set(activeReport.rows.map(\.id))
+            var appended: [TeamDrillDownItem] = []
+            for row in pageData.rows {
+                if seenIds.insert(row.id).inserted {
+                    appended.append(row)
+                }
+            }
+            var updated = activeReport
+            updated.rows = activeReport.rows + appended
+            updated.nextCursor = pageData.nextCursor
+            selectedTeamReport = updated
+        case .failure(let message, _, _, _):
+            if !res.isCancelledRequest {
+                showBanner(message, isError: true)
+            }
         }
     }
 
