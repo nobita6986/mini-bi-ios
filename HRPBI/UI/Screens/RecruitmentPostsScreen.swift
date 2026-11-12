@@ -2,7 +2,6 @@ import SwiftUI
 
 public struct RecruitmentPostsScreen: View {
     @ObservedObject var viewModel: MiniBiViewModel
-    @State private var visibleUnfilteredCount: Int = RecruitmentPostContract.defaultPageSize
 
     public init(viewModel: MiniBiViewModel) {
         self.viewModel = viewModel
@@ -13,11 +12,7 @@ public struct RecruitmentPostsScreen: View {
         let allCards = viewModel.recruitmentPosts.map { RecruitmentPostContract.toCardViewModel($0) }
         let filteredCards = viewModel.filteredRecruitmentPosts.map { RecruitmentPostContract.toCardViewModel($0) }
         let isFiltering = viewModel.hasActiveRecruitmentPostFilter
-        let displayedCards = isFiltering
-            ? filteredCards
-            : Array(filteredCards.prefix(max(RecruitmentPostContract.defaultPageSize, visibleUnfilteredCount)))
-        let hasMoreToDisplayOrLoad = (!isFiltering && displayedCards.count < filteredCards.count)
-            || viewModel.recruitmentPostsHasMore
+        let displayedCards = filteredCards
         let kcnOptions = viewModel.availableRecruitmentIndustrialParkFilters
         let laborTypeOptions = viewModel.availableRecruitmentLaborTypeFilters
         let selectedKcnOption = kcnOptions.first(where: { opt in
@@ -29,8 +24,9 @@ public struct RecruitmentPostsScreen: View {
         let selectedLaborOption = laborTypeOptions.first(where: {
             $0.laborTypeKey == viewModel.selectedRecruitmentLaborTypeKey
         })
-        let allKcnMenuLabel = allCards.isEmpty ? "Tất cả KCN" : "Tất cả KCN (\(allCards.count))"
-        let allLaborMenuLabel = allCards.isEmpty ? "Tất cả hình thức" : "Tất cả hình thức (\(allCards.count))"
+        let totalCatalogJobs = viewModel.recruitmentCatalogTotalJobCount
+        let allKcnMenuLabel = totalCatalogJobs > 0 ? "Tất cả KCN (\(totalCatalogJobs))" : "Tất cả KCN"
+        let allLaborMenuLabel = totalCatalogJobs > 0 ? "Tất cả hình thức (\(totalCatalogJobs))" : "Tất cả hình thức"
 
         VStack(spacing: 0) {
             VStack(spacing: 8) {
@@ -43,9 +39,10 @@ public struct RecruitmentPostsScreen: View {
                         .font(.subheadline.weight(.bold))
                         .foregroundColor(SemanticColors.textPrimary)
 
-                    if !allCards.isEmpty {
+                    if !allCards.isEmpty || totalCatalogJobs > 0 {
+                        let filteredTotal = viewModel.recruitmentTotalCount ?? filteredCards.count
                         let countBadgeText = isFiltering
-                            ? "\(filteredCards.count)/\(allCards.count)"
+                            ? "\(filteredTotal)/\(max(totalCatalogJobs, filteredTotal))"
                             : "\(allCards.count)\(viewModel.recruitmentPostsHasMore ? "+" : "")"
                         Text(countBadgeText)
                             .font(.caption2.weight(.bold).monospacedDigit())
@@ -238,10 +235,7 @@ public struct RecruitmentPostsScreen: View {
                     actionTitle: "Thử lại",
                     theme: theme,
                     onAction: {
-                        Task {
-                            visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
-                            await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
-                        }
+                        Task { await viewModel.loadRecruitmentPosts(reset: true) }
                     }
                 )
             } else if viewModel.recruitmentPostsLoading && allCards.isEmpty {
@@ -289,21 +283,17 @@ public struct RecruitmentPostsScreen: View {
                         actionTitle: "Thử lại",
                         theme: theme,
                         onAction: {
-                            Task {
-                                visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
-                                await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
-                            }
+                            Task { await viewModel.loadRecruitmentPosts(reset: true) }
                         }
                     )
                     .frame(minHeight: 360)
                 }
                 .refreshable {
                     await viewModel.performRefreshable {
-                        visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
-                        await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
+                        await viewModel.loadRecruitmentPosts(reset: true)
                     }
                 }
-            } else if allCards.isEmpty {
+            } else if allCards.isEmpty && !isFiltering {
                 ScrollView {
                     RecruitmentPostStateView(
                         iconName: "megaphone",
@@ -317,8 +307,7 @@ public struct RecruitmentPostsScreen: View {
                 }
                 .refreshable {
                     await viewModel.performRefreshable {
-                        visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
-                        await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
+                        await viewModel.loadRecruitmentPosts(reset: true)
                     }
                 }
             } else if filteredCards.isEmpty {
@@ -338,8 +327,7 @@ public struct RecruitmentPostsScreen: View {
                 }
                 .refreshable {
                     await viewModel.performRefreshable {
-                        visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
-                        await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
+                        await viewModel.loadRecruitmentPosts(reset: true)
                     }
                 }
             } else {
@@ -355,9 +343,9 @@ public struct RecruitmentPostsScreen: View {
                                     HapticsManager.lightImpact()
                                     Task {
                                         if viewModel.recruitmentPostsHasMore {
-                                            await viewModel.ensureAllRecruitmentPostsLoaded()
+                                            await viewModel.loadMoreRecruitmentPosts()
                                         } else {
-                                            await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
+                                            await viewModel.loadRecruitmentPosts(reset: true)
                                         }
                                     }
                                 }
@@ -381,21 +369,15 @@ public struct RecruitmentPostsScreen: View {
                             )
                         }
 
-                        if hasMoreToDisplayOrLoad {
+                        if viewModel.recruitmentPostsHasMore {
+                            let knownTotal = viewModel.recruitmentTotalCount
                             HrpLoadMoreButton(
                                 loadedCount: displayedCards.count,
-                                totalCount: allCards.count > displayedCards.count ? allCards.count : nil,
+                                totalCount: (knownTotal != nil && knownTotal! > displayedCards.count) ? knownTotal : nil,
                                 isLoading: viewModel.recruitmentPostsLoadingMore,
                                 theme: theme
                             ) {
-                                if !isFiltering && displayedCards.count < filteredCards.count {
-                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                        visibleUnfilteredCount += RecruitmentPostContract.defaultPageSize
-                                    }
-                                }
-                                if viewModel.recruitmentPostsHasMore {
-                                    Task { await viewModel.ensureAllRecruitmentPostsLoaded() }
-                                }
+                                Task { await viewModel.loadMoreRecruitmentPosts() }
                             }
                             .disabled(viewModel.recruitmentPostsLoading || viewModel.recruitmentPostsLoadingMore)
                             .accessibilityIdentifier("recruitment_posts_load_more_button")
@@ -405,19 +387,18 @@ public struct RecruitmentPostsScreen: View {
                 }
                 .refreshable {
                     await viewModel.performRefreshable {
-                        visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
-                        await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
+                        await viewModel.loadRecruitmentPosts(reset: true)
                     }
                 }
             }
         }
         .background(theme.background)
         .task {
-            await viewModel.loadRecruitmentPostsAndAllPages(reset: false)
-        }
-        .onChange(of: viewModel.recruitmentPostsHasMore) { hasMore in
-            if hasMore && !viewModel.recruitmentPostsLoading && !viewModel.recruitmentPostsLoadingMore {
-                Task { await viewModel.ensureAllRecruitmentPostsLoaded() }
+            if viewModel.recruitmentPosts.isEmpty
+                && !viewModel.recruitmentPostsLoading
+                && !viewModel.recruitmentPostsAccessDenied
+                && !viewModel.recruitmentPostsFeatureUnavailable {
+                await viewModel.loadRecruitmentPosts(reset: true)
             }
         }
         .sheet(

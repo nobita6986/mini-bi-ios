@@ -171,7 +171,9 @@ public struct RecruitmentPostListResult: Equatable, Sendable {
     public let hasMore: Bool
     public let nextCursor: String?
     public let snapshotToken: String
+    public let totalCount: Int?
     public let industrialParks: [RecruitmentPostIndustrialParkSummary]
+    public let laborTypes: [RecruitmentPostLaborTypeSummary]
 
     public init(
         items: [RecruitmentPostItem],
@@ -179,14 +181,18 @@ public struct RecruitmentPostListResult: Equatable, Sendable {
         hasMore: Bool,
         nextCursor: String?,
         snapshotToken: String,
-        industrialParks: [RecruitmentPostIndustrialParkSummary] = []
+        totalCount: Int? = nil,
+        industrialParks: [RecruitmentPostIndustrialParkSummary] = [],
+        laborTypes: [RecruitmentPostLaborTypeSummary] = []
     ) {
         self.items = items
         self.pageSize = pageSize
         self.hasMore = hasMore
         self.nextCursor = nextCursor
         self.snapshotToken = snapshotToken
+        self.totalCount = totalCount
         self.industrialParks = industrialParks
+        self.laborTypes = laborTypes
     }
 }
 
@@ -493,7 +499,9 @@ public enum RecruitmentPostContract {
     ]
 
     private static let listOptionalKeys: Set<String> = [
-        "industrial_parks"
+        "total_count",
+        "industrial_parks",
+        "labor_types"
     ]
 
     private static let detailDataKeys: Set<String> = ["post"]
@@ -520,14 +528,27 @@ public enum RecruitmentPostContract {
     public static func buildListPath(
         pageSize: Int = defaultPageSize,
         cursor: String? = nil,
-        snapshotToken: String? = nil
+        snapshotToken: String? = nil,
+        industrialParkId: String? = nil,
+        laborTypeKey: String? = nil,
+        includeFacets: Bool = true
     ) -> String {
         let safePageSize = min(max(pageSize, 1), maxPageSize)
         var components = URLComponents()
         components.path = "/api/recruitment-posts"
-        var queryItems: [URLQueryItem] = [
-            URLQueryItem(name: "page_size", value: String(safePageSize))
-        ]
+        var queryItems: [URLQueryItem] = []
+        if includeFacets {
+            queryItems.append(URLQueryItem(name: "include_facets", value: "true"))
+        }
+        queryItems.append(URLQueryItem(name: "page_size", value: String(safePageSize)))
+        let cleanIndustrialParkId = industrialParkId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanIndustrialParkId.isEmpty {
+            queryItems.append(URLQueryItem(name: "industrial_park_id", value: cleanIndustrialParkId))
+        }
+        let cleanLaborTypeKey = laborTypeKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanLaborTypeKey.isEmpty {
+            queryItems.append(URLQueryItem(name: "labor_type_key", value: cleanLaborTypeKey))
+        }
         let cleanCursor = cursor?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let cleanSnapshot = snapshotToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !cleanCursor.isEmpty && !cleanSnapshot.isEmpty {
@@ -881,6 +902,13 @@ public enum RecruitmentPostContract {
             items.append(parsed)
         }
 
+        let optionalTotalCount: Int?
+        if let rawTotal = data["total_count"], !(rawTotal is NSNull) {
+            optionalTotalCount = try requirePositiveInt(data, "total_count", min: 0, max: Int.max)
+        } else {
+            optionalTotalCount = nil
+        }
+
         var optionalIndustrialParks: [RecruitmentPostIndustrialParkSummary] = []
         if let rawParks = data["industrial_parks"] as? [Any] {
             for elem in rawParks {
@@ -892,7 +920,8 @@ public enum RecruitmentPostContract {
                             industrialParkId: cleanName,
                             industrialParkCode: cleanName,
                             displayName: cleanName,
-                            active: true
+                            active: true,
+                            jobCount: 0
                         )
                     )
                 } else if let obj = elem as? [String: Any] {
@@ -914,15 +943,57 @@ public enum RecruitmentPostContract {
                         ?? displayName
                     ).trimmingCharacters(in: .whitespacesAndNewlines)
                     let active = (obj["active"] as? Bool) ?? true
+                    let jobCount: Int
+                    if let countInt = obj["job_count"] as? Int {
+                        jobCount = max(0, countInt)
+                    } else if let num = obj["job_count"] as? NSNumber {
+                        jobCount = max(0, num.intValue)
+                    } else {
+                        jobCount = 0
+                    }
                     optionalIndustrialParks.append(
                         RecruitmentPostIndustrialParkSummary(
                             industrialParkId: parkId.isEmpty ? displayName : parkId,
                             industrialParkCode: parkCode.isEmpty ? displayName : parkCode,
                             displayName: displayName,
-                            active: active
+                            active: active,
+                            jobCount: jobCount
                         )
                     )
                 }
+            }
+        }
+
+        var optionalLaborTypes: [RecruitmentPostLaborTypeSummary] = []
+        if let rawLaborTypes = data["labor_types"] as? [Any] {
+            for elem in rawLaborTypes {
+                guard let obj = elem as? [String: Any] else { continue }
+                let key = (
+                    (obj["labor_type_key"] as? String)
+                    ?? (obj["key"] as? String)
+                    ?? ""
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayName = (
+                    (obj["display_name"] as? String)
+                    ?? (obj["name"] as? String)
+                    ?? key
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty, !displayName.isEmpty else { continue }
+                let jobCount: Int
+                if let countInt = obj["job_count"] as? Int {
+                    jobCount = max(0, countInt)
+                } else if let num = obj["job_count"] as? NSNumber {
+                    jobCount = max(0, num.intValue)
+                } else {
+                    jobCount = 0
+                }
+                optionalLaborTypes.append(
+                    RecruitmentPostLaborTypeSummary(
+                        laborTypeKey: key,
+                        displayName: displayName,
+                        jobCount: jobCount
+                    )
+                )
             }
         }
 
@@ -932,7 +1003,9 @@ public enum RecruitmentPostContract {
             hasMore: hasMore,
             nextCursor: nextCursor,
             snapshotToken: snapshotToken,
-            industrialParks: optionalIndustrialParks
+            totalCount: optionalTotalCount,
+            industrialParks: optionalIndustrialParks,
+            laborTypes: optionalLaborTypes
         )
     }
 
@@ -1449,12 +1522,18 @@ public final class RecruitmentPostService: @unchecked Sendable {
     public func listRecruitmentPosts(
         pageSize: Int = RecruitmentPostContract.defaultPageSize,
         cursor: String? = nil,
-        snapshotToken: String? = nil
+        snapshotToken: String? = nil,
+        industrialParkId: String? = nil,
+        laborTypeKey: String? = nil,
+        includeFacets: Bool = true
     ) async -> MiniBiApiResult<RecruitmentPostListResult> {
         let path = RecruitmentPostContract.buildListPath(
             pageSize: pageSize,
             cursor: cursor,
-            snapshotToken: snapshotToken
+            snapshotToken: snapshotToken,
+            industrialParkId: industrialParkId,
+            laborTypeKey: laborTypeKey,
+            includeFacets: includeFacets
         )
         let response = await httpClient.request(method: "GET", path: path)
         guard response.isSuccess, let root = response.jsonObject else {

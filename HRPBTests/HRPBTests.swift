@@ -5156,11 +5156,25 @@ final class HRPBTests: XCTestCase {
             ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15"]
         )
 
-        // 2. Verify Recruitment auto-load all pages & KCN/LaborType job counts ("KCN Khai Quang (5)")
-        let ipKhaiQuang = "11111111-2222-4333-8444-555555555511"
-        let ipBaThien = "11111111-2222-4333-8444-555555555522"
+        // 2. Verify Recruitment include_facets=true server-indexed facets (page_size=10 single-page load, job_count >= 1)
+        let ipAn = "10000000-0000-4000-8000-000000000301"
+        let ipAng = "10000000-0000-4000-8000-000000000302"
+        let ipBaThien = "55555555-5555-4555-8555-555555555555"
+        let ipZero = "10000000-0000-4000-8000-000000000399"
         let snap1 = "dddd0001-2222-4333-8444-555555555501"
         let cursor1 = "eeee0001-2222-4333-8444-555555555501"
+
+        XCTAssertEqual(
+            RecruitmentPostContract.buildListPath(
+                pageSize: 10,
+                cursor: nil,
+                snapshotToken: nil,
+                industrialParkId: ipBaThien,
+                laborTypeKey: "CHINH_THUC",
+                includeFacets: true
+            ),
+            "/api/recruitment-posts?include_facets=true&page_size=10&industrial_park_id=\(ipBaThien)&labor_type_key=CHINH_THUC"
+        )
 
         func makeItemJson(idx: Int, ipId: String, ipCode: String, ipName: String, laborKey: String, laborLabel: String) -> String {
             let briefId = String(format: "888800%02d-2222-4333-8444-555555555500", idx)
@@ -5177,16 +5191,14 @@ final class HRPBTests: XCTestCase {
         }
 
         let page1Items = [
-            makeItemJson(idx: 1, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
-            makeItemJson(idx: 2, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
-            makeItemJson(idx: 3, ipId: ipBaThien, ipCode: "KCN_BA_THIEN_1", ipName: "KCN Bá Thiện 1", laborKey: "THOI_VU", laborLabel: "Thời vụ")
+            makeItemJson(idx: 1, ipId: ipBaThien, ipCode: "VP_BA_THIEN_1", ipName: "KCN Bá Thiện 1", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 2, ipId: ipBaThien, ipCode: "VP_BA_THIEN_1", ipName: "KCN Bá Thiện 1", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 3, ipId: ipAng, ipCode: "AA_ANG", ipName: "KCN Ang", laborKey: "THOI_VU", laborLabel: "Thời vụ")
         ].joined(separator: ",")
 
-        let page2Items = [
-            makeItemJson(idx: 4, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
-            makeItemJson(idx: 5, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "THOI_VU", laborLabel: "Thời vụ"),
-            makeItemJson(idx: 6, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
-            makeItemJson(idx: 7, ipId: ipBaThien, ipCode: "KCN_BA_THIEN_1", ipName: "KCN Bá Thiện 1", laborKey: "THOI_VU", laborLabel: "Thời vụ")
+        let filteredBaThienItems = [
+            makeItemJson(idx: 1, ipId: ipBaThien, ipCode: "VP_BA_THIEN_1", ipName: "KCN Bá Thiện 1", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 2, ipId: ipBaThien, ipCode: "VP_BA_THIEN_1", ipName: "KCN Bá Thiện 1", laborKey: "CHINH_THUC", laborLabel: "Chính thức")
         ].joined(separator: ",")
 
         MockURLProtocol.resetRecordedUrls()
@@ -5195,16 +5207,33 @@ final class HRPBTests: XCTestCase {
             let fullUrl = url.absoluteString
             let body: String
             if fullUrl.contains("/api/recruitment-posts?") {
-                if fullUrl.contains("cursor=\(cursor1)") {
+                if fullUrl.contains("industrial_park_id=\(ipBaThien)") {
                     body = """
                     {
                       "ok": true,
                       "data": {
-                        "items": [\(page2Items)],
+                        "items": [\(filteredBaThienItems)],
                         "page_size": 10,
-                        "next_cursor": null,
-                        "has_more": false,
-                        "snapshot_token": "\(snap1)"
+                        "has_more": true,
+                        "next_cursor": "\(cursor1)",
+                        "snapshot_token": "\(snap1)",
+                        "total_count": 20,
+                        "industrial_parks": [
+                          {
+                            "industrial_park_id": "\(ipBaThien)",
+                            "industrial_park_code": "VP_BA_THIEN_1",
+                            "display_name": "KCN Bá Thiện 1",
+                            "active": true,
+                            "job_count": 20
+                          }
+                        ],
+                        "labor_types": [
+                          {
+                            "labor_type_key": "CHINH_THUC",
+                            "display_name": "Chính thức",
+                            "job_count": 20
+                          }
+                        ]
                       }
                     }
                     """
@@ -5214,15 +5243,53 @@ final class HRPBTests: XCTestCase {
                       "ok": true,
                       "data": {
                         "items": [\(page1Items)],
-                        "industrial_parks": [
-                          { "industrial_park_id": "\(ipKhaiQuang)", "display_name": "KCN Khai Quang" },
-                          { "industrial_park_id": "\(ipBaThien)", "display_name": "KCN Bá Thiện 1" },
-                          "KCN Thăng Long 3"
-                        ],
                         "page_size": 10,
-                        "next_cursor": "\(cursor1)",
                         "has_more": true,
-                        "snapshot_token": "\(snap1)"
+                        "next_cursor": "\(cursor1)",
+                        "snapshot_token": "\(snap1)",
+                        "total_count": 25,
+                        "industrial_parks": [
+                          {
+                            "industrial_park_id": "\(ipAn)",
+                            "industrial_park_code": "ZZ_AN_NFD",
+                            "display_name": "KCN Án",
+                            "active": true,
+                            "job_count": 2
+                          },
+                          {
+                            "industrial_park_id": "\(ipAng)",
+                            "industrial_park_code": "AA_ANG",
+                            "display_name": "KCN Ang",
+                            "active": true,
+                            "job_count": 3
+                          },
+                          {
+                            "industrial_park_id": "\(ipBaThien)",
+                            "industrial_park_code": "VP_BA_THIEN_1",
+                            "display_name": "KCN Bá Thiện 1",
+                            "active": true,
+                            "job_count": 20
+                          },
+                          {
+                            "industrial_park_id": "\(ipZero)",
+                            "industrial_park_code": "ZZ_ZERO",
+                            "display_name": "KCN Rỗng",
+                            "active": true,
+                            "job_count": 0
+                          }
+                        ],
+                        "labor_types": [
+                          {
+                            "labor_type_key": "CHINH_THUC",
+                            "display_name": "Chính thức",
+                            "job_count": 20
+                          },
+                          {
+                            "labor_type_key": "THOI_VU",
+                            "display_name": "Thời vụ",
+                            "job_count": 5
+                          }
+                        ]
                       }
                     }
                     """
@@ -5252,45 +5319,41 @@ final class HRPBTests: XCTestCase {
         )
         vm.isAuthenticated = true
 
-        // Initial page 1 load preserves single-page fetch contract when no filter is active
+        // Initial page 1 load ONLY fetches 1 page (`include_facets=true&page_size=10`), no background multi-page loop
         await vm.loadRecruitmentPosts(reset: true)
         XCTAssertEqual(vm.recruitmentPosts.count, 3)
         XCTAssertTrue(vm.recruitmentPostsHasMore)
+        XCTAssertEqual(vm.recruitmentTotalCount, 25)
+        XCTAssertEqual(vm.recruitmentCatalogTotalJobCount, 25)
+        XCTAssertTrue(MockURLProtocol.recordedUrls().contains(where: { $0.contains("include_facets=true") && $0.contains("page_size=10") }))
+        XCTAssertFalse(MockURLProtocol.recordedUrls().contains(where: { $0.contains("cursor=\(cursor1)") }))
 
-        // Screen auto-loads remaining pages in background via ensureAllRecruitmentPostsLoaded()
-        await vm.ensureAllRecruitmentPostsLoaded()
-        XCTAssertEqual(vm.recruitmentPosts.count, 7)
-        XCTAssertFalse(vm.recruitmentPostsHasMore)
-
+        // Filter menus must include all KCNs and Labor Types from server facets with job_count >= 1
         let kcnFilters = vm.availableRecruitmentIndustrialParkFilters
         XCTAssertEqual(
             kcnFilters.map(\.formattedLabel),
-            ["KCN Bá Thiện 1 (2)", "KCN Khai Quang (5)", "KCN Thăng Long 3 (0)"]
+            ["KCN Ang (3)", "KCN Án (2)", "KCN Bá Thiện 1 (20)"]
         )
 
         let laborFilters = vm.availableRecruitmentLaborTypeFilters
         XCTAssertEqual(
             laborFilters.map(\.formattedLabel),
-            ["Chính thức (4)", "Thời vụ (3)"]
+            ["Chính thức (20)", "Thời vụ (5)"]
         )
 
-        // Selecting KCN Khai Quang filters down to 5 jobs
-        await vm.selectRecruitmentIndustrialParkFilter(ipKhaiQuang)
-        XCTAssertEqual(vm.filteredRecruitmentPosts.count, 5)
-
-        // Reset state and simulate tapping "Tuyển dụng" tab (`navigateTo(.recruitment)`) concurrent with `.task`
-        vm.resetRecruitmentPostsState()
-        vm.navigateTo(.recruitment)
-        await vm.loadRecruitmentPostsAndAllPages(reset: false)
-        XCTAssertEqual(vm.recruitmentPosts.count, 7)
-        XCTAssertFalse(vm.recruitmentPostsHasMore)
+        // Selecting KCN Bá Thiện 1 requests server-filtered page 1 (`industrial_park_id=...`) while keeping full catalog facets
+        await vm.selectRecruitmentIndustrialParkFilter(ipBaThien)
+        XCTAssertEqual(vm.filteredRecruitmentPosts.count, 2)
+        XCTAssertEqual(vm.recruitmentTotalCount, 20)
+        XCTAssertEqual(vm.recruitmentCatalogTotalJobCount, 25)
+        XCTAssertTrue(MockURLProtocol.recordedUrls().contains(where: { $0.contains("industrial_park_id=\(ipBaThien)") }))
         XCTAssertEqual(
             vm.availableRecruitmentIndustrialParkFilters.map(\.formattedLabel),
-            ["KCN Bá Thiện 1 (2)", "KCN Khai Quang (5)", "KCN Thăng Long 3 (0)"]
+            ["KCN Ang (3)", "KCN Án (2)", "KCN Bá Thiện 1 (20)"]
         )
         XCTAssertEqual(
             vm.availableRecruitmentLaborTypeFilters.map(\.formattedLabel),
-            ["Chính thức (4)", "Thời vụ (3)"]
+            ["Chính thức (20)", "Thời vụ (5)"]
         )
 
         // Work report history date clamps future date to todayVietnamIsoDate

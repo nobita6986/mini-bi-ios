@@ -228,7 +228,10 @@ public final class MiniBiViewModel: ObservableObject {
 
     // MARK: - Recruitment Posts ("Tin tuyển dụng" — Read-Only) State
     @Published public var recruitmentPosts: [RecruitmentPostItem] = []
+    @Published public var recruitmentTotalCount: Int? = nil
+    @Published public var recruitmentCatalogTotalCount: Int? = nil
     @Published public var recruitmentServerIndustrialParks: [RecruitmentPostIndustrialParkSummary] = []
+    @Published public var recruitmentServerLaborTypes: [RecruitmentPostLaborTypeSummary] = []
     @Published public var selectedRecruitmentIndustrialParkId: String? = nil
     @Published public var selectedRecruitmentLaborTypeKey: String? = nil
     @Published public var recruitmentPostsLoading: Bool = false
@@ -640,9 +643,11 @@ public final class MiniBiViewModel: ObservableObject {
             }
         } else if destination == .recruitment {
             if isAuthenticated
+                && recruitmentPosts.isEmpty
+                && !recruitmentPostsLoading
                 && !recruitmentPostsAccessDenied
                 && !recruitmentPostsFeatureUnavailable {
-                Task { await loadRecruitmentPostsAndAllPages(reset: false) }
+                Task { await loadRecruitmentPosts(reset: true) }
             }
         } else if destination == .newEntry {
             if isAuthenticated && currentUser?.canLoadDirectEntryCatalog == true && directEntryOptions.catalogProjects.isEmpty {
@@ -922,7 +927,9 @@ public final class MiniBiViewModel: ObservableObject {
                     await self.loadSalaryAdvanceContext()
                 }
             case .recruitment:
-                await self.loadRecruitmentPostsAndAllPages(reset: false)
+                if self.recruitmentPosts.isEmpty && !self.recruitmentPostsLoading {
+                    await self.loadRecruitmentPosts(reset: true)
+                }
             case .newEntry:
                 if self.currentUser?.canLoadDirectEntryCatalog == true && self.directEntryOptions.catalogProjects.isEmpty {
                     await self.loadDirectEntryAssigneeOptions()
@@ -4927,82 +4934,150 @@ public final class MiniBiViewModel: ObservableObject {
         selectedRecruitmentIndustrialParkId != nil || selectedRecruitmentLaborTypeKey != nil
     }
 
+    public var hasServerRecruitmentFacets: Bool {
+        recruitmentCatalogTotalCount != nil
+            || recruitmentTotalCount != nil
+            || recruitmentServerIndustrialParks.contains(where: { $0.jobCount > 0 })
+            || recruitmentServerLaborTypes.contains(where: { $0.jobCount > 0 })
+    }
+
+    public var recruitmentCatalogTotalJobCount: Int {
+        if let catalogTotal = recruitmentCatalogTotalCount, catalogTotal > 0 {
+            return catalogTotal
+        }
+        let kcnSum = recruitmentServerIndustrialParks.reduce(0) { $0 + max(0, $1.jobCount) }
+        if kcnSum > 0 {
+            return kcnSum
+        }
+        if let total = recruitmentTotalCount, total > 0 {
+            return total
+        }
+        return recruitmentPosts.count
+    }
+
     public var availableRecruitmentIndustrialParkFilters: [RecruitmentPostIndustrialParkSummary] {
         var result: [RecruitmentPostIndustrialParkSummary] = []
         var indexById: [String: Int] = [:]
         var indexByName: [String: Int] = [:]
 
-        func upsertPark(_ park: RecruitmentPostIndustrialParkSummary, incrementJobCount: Bool) {
-            let cleanId = park.industrialParkId.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanName = park.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !cleanId.isEmpty || !cleanName.isEmpty else { return }
-            let idKey = cleanId.lowercased()
-            let nameKey = cleanName.lowercased()
-
-            if let existingIdx = (!idKey.isEmpty ? indexById[idKey] : nil) ?? (!nameKey.isEmpty ? indexByName[nameKey] : nil) {
-                if incrementJobCount {
-                    result[existingIdx].jobCount += 1
+        let serverParksWithCounts = recruitmentServerIndustrialParks.filter { $0.jobCount >= 1 }
+        if !serverParksWithCounts.isEmpty || hasServerRecruitmentFacets {
+            for park in serverParksWithCounts {
+                let cleanId = park.industrialParkId.trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleanName = park.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleanId.isEmpty || !cleanName.isEmpty else { continue }
+                let idKey = cleanId.lowercased()
+                let nameKey = cleanName.lowercased()
+                if let existingIdx = (!idKey.isEmpty ? indexById[idKey] : nil) ?? (!nameKey.isEmpty ? indexByName[nameKey] : nil) {
+                    result[existingIdx].jobCount = max(result[existingIdx].jobCount, park.jobCount)
+                    continue
                 }
-                return
+                let newIdx = result.count
+                result.append(
+                    RecruitmentPostIndustrialParkSummary(
+                        industrialParkId: cleanId.isEmpty ? cleanName : cleanId,
+                        industrialParkCode: park.industrialParkCode.isEmpty ? cleanName : park.industrialParkCode,
+                        displayName: cleanName.isEmpty ? cleanId : cleanName,
+                        active: park.active,
+                        jobCount: park.jobCount
+                    )
+                )
+                if !idKey.isEmpty {
+                    indexById[idKey] = newIdx
+                }
+                if !nameKey.isEmpty {
+                    indexByName[nameKey] = newIdx
+                }
             }
-
-            let newIdx = result.count
-            let entry = RecruitmentPostIndustrialParkSummary(
-                industrialParkId: cleanId.isEmpty ? cleanName : cleanId,
-                industrialParkCode: park.industrialParkCode.isEmpty ? cleanName : park.industrialParkCode,
-                displayName: cleanName.isEmpty ? cleanId : cleanName,
-                active: park.active,
-                jobCount: incrementJobCount ? 1 : 0
-            )
-            result.append(entry)
-            if !idKey.isEmpty {
-                indexById[idKey] = newIdx
+        } else {
+            for item in recruitmentPosts {
+                let park = item.industrialPark
+                let cleanId = park.industrialParkId.trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleanName = park.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !cleanId.isEmpty || !cleanName.isEmpty else { continue }
+                let idKey = cleanId.lowercased()
+                let nameKey = cleanName.lowercased()
+                if let existingIdx = (!idKey.isEmpty ? indexById[idKey] : nil) ?? (!nameKey.isEmpty ? indexByName[nameKey] : nil) {
+                    result[existingIdx].jobCount += 1
+                    continue
+                }
+                let newIdx = result.count
+                result.append(
+                    RecruitmentPostIndustrialParkSummary(
+                        industrialParkId: cleanId.isEmpty ? cleanName : cleanId,
+                        industrialParkCode: park.industrialParkCode.isEmpty ? cleanName : park.industrialParkCode,
+                        displayName: cleanName.isEmpty ? cleanId : cleanName,
+                        active: park.active,
+                        jobCount: 1
+                    )
+                )
+                if !idKey.isEmpty {
+                    indexById[idKey] = newIdx
+                }
+                if !nameKey.isEmpty {
+                    indexByName[nameKey] = newIdx
+                }
             }
-            if !nameKey.isEmpty {
-                indexByName[nameKey] = newIdx
-            }
-        }
-
-        for item in recruitmentPosts {
-            upsertPark(item.industrialPark, incrementJobCount: true)
-        }
-        for serverPark in recruitmentServerIndustrialParks {
-            upsertPark(serverPark, incrementJobCount: false)
         }
 
         let viLocale = Locale(identifier: "vi_VN")
-        return result.sorted {
-            $0.displayName.compare($1.displayName, options: [.caseInsensitive, .diacriticInsensitive], range: nil, locale: viLocale) == .orderedAscending
-        }
+        return result
+            .filter { $0.jobCount >= 1 }
+            .sorted {
+                $0.displayName.compare($1.displayName, options: [.caseInsensitive, .diacriticInsensitive], range: nil, locale: viLocale) == .orderedAscending
+            }
     }
 
     public var availableRecruitmentLaborTypeFilters: [RecruitmentPostLaborTypeSummary] {
         var result: [RecruitmentPostLaborTypeSummary] = []
         var indexByKey: [String: Int] = [:]
 
-        for item in recruitmentPosts {
-            var seenInPost = Set<String>()
-            for lt in item.general.laborTypes {
+        let serverLaborTypesWithCounts = recruitmentServerLaborTypes.filter { $0.jobCount >= 1 }
+        if !serverLaborTypesWithCounts.isEmpty || hasServerRecruitmentFacets {
+            for lt in serverLaborTypesWithCounts {
                 let key = lt.laborTypeKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !key.isEmpty, seenInPost.insert(key).inserted else { continue }
+                guard !key.isEmpty else { continue }
                 if let existingIdx = indexByKey[key] {
-                    result[existingIdx].jobCount += 1
+                    result[existingIdx].jobCount = max(result[existingIdx].jobCount, lt.jobCount)
                 } else {
                     indexByKey[key] = result.count
                     result.append(
                         RecruitmentPostLaborTypeSummary(
                             laborTypeKey: key,
                             displayName: lt.displayName,
-                            jobCount: 1
+                            jobCount: lt.jobCount
                         )
                     )
                 }
             }
+        } else {
+            for item in recruitmentPosts {
+                var seenInPost = Set<String>()
+                for lt in item.general.laborTypes {
+                    let key = lt.laborTypeKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !key.isEmpty, seenInPost.insert(key).inserted else { continue }
+                    if let existingIdx = indexByKey[key] {
+                        result[existingIdx].jobCount += 1
+                    } else {
+                        indexByKey[key] = result.count
+                        result.append(
+                            RecruitmentPostLaborTypeSummary(
+                                laborTypeKey: key,
+                                displayName: lt.displayName,
+                                jobCount: 1
+                            )
+                        )
+                    }
+                }
+            }
         }
+
         let viLocale = Locale(identifier: "vi_VN")
-        return result.sorted {
-            $0.displayName.compare($1.displayName, options: [.caseInsensitive, .diacriticInsensitive], range: nil, locale: viLocale) == .orderedAscending
-        }
+        return result
+            .filter { $0.jobCount >= 1 }
+            .sorted {
+                $0.displayName.compare($1.displayName, options: [.caseInsensitive, .diacriticInsensitive], range: nil, locale: viLocale) == .orderedAscending
+            }
     }
 
     public var filteredRecruitmentPosts: [RecruitmentPostItem] {
@@ -5027,23 +5102,39 @@ public final class MiniBiViewModel: ObservableObject {
 
     public func selectRecruitmentIndustrialParkFilter(_ industrialParkId: String?) async {
         let clean = industrialParkId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        selectedRecruitmentIndustrialParkId = clean.isEmpty ? nil : clean
-        if hasActiveRecruitmentPostFilter {
+        let newValue: String? = clean.isEmpty ? nil : clean
+        let changed = selectedRecruitmentIndustrialParkId != newValue
+        selectedRecruitmentIndustrialParkId = newValue
+        if hasServerRecruitmentFacets {
+            if changed {
+                await loadRecruitmentPosts(reset: true)
+            }
+        } else if hasActiveRecruitmentPostFilter {
             await ensureAllRecruitmentPostsLoadedForFiltering()
         }
     }
 
     public func selectRecruitmentLaborTypeFilter(_ laborTypeKey: String?) async {
         let clean = laborTypeKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        selectedRecruitmentLaborTypeKey = clean.isEmpty ? nil : clean
-        if hasActiveRecruitmentPostFilter {
+        let newValue: String? = clean.isEmpty ? nil : clean
+        let changed = selectedRecruitmentLaborTypeKey != newValue
+        selectedRecruitmentLaborTypeKey = newValue
+        if hasServerRecruitmentFacets {
+            if changed {
+                await loadRecruitmentPosts(reset: true)
+            }
+        } else if hasActiveRecruitmentPostFilter {
             await ensureAllRecruitmentPostsLoadedForFiltering()
         }
     }
 
     public func clearRecruitmentPostFilters() {
+        let wasFiltering = hasActiveRecruitmentPostFilter
         selectedRecruitmentIndustrialParkId = nil
         selectedRecruitmentLaborTypeKey = nil
+        if wasFiltering && hasServerRecruitmentFacets {
+            Task { await loadRecruitmentPosts(reset: true) }
+        }
     }
 
     public func ensureAllRecruitmentPostsLoaded(maxPages: Int = 50) async {
@@ -5076,21 +5167,6 @@ public final class MiniBiViewModel: ObservableObject {
         }
     }
 
-    public func loadRecruitmentPostsAndAllPages(reset: Bool = false) async {
-        let task = Task { @MainActor in
-            if reset {
-                await self.loadRecruitmentPosts(reset: true)
-            } else if self.recruitmentPosts.isEmpty
-                && !self.recruitmentPostsLoading
-                && !self.recruitmentPostsAccessDenied
-                && !self.recruitmentPostsFeatureUnavailable {
-                await self.loadRecruitmentPosts(reset: true)
-            }
-            await self.ensureAllRecruitmentPostsLoaded()
-        }
-        await task.value
-    }
-
     public func ensureAllRecruitmentPostsLoadedForFiltering(maxPages: Int = 50) async {
         guard hasActiveRecruitmentPostFilter else { return }
         await ensureAllRecruitmentPostsLoaded(maxPages: maxPages)
@@ -5099,7 +5175,10 @@ public final class MiniBiViewModel: ObservableObject {
     public func resetRecruitmentPostsState() {
         cancelInFlightRecruitmentPostRequests()
         recruitmentPosts = []
+        recruitmentTotalCount = nil
+        recruitmentCatalogTotalCount = nil
         recruitmentServerIndustrialParks = []
+        recruitmentServerLaborTypes = []
         selectedRecruitmentIndustrialParkId = nil
         selectedRecruitmentLaborTypeKey = nil
         recruitmentPostsError = nil
@@ -5116,7 +5195,7 @@ public final class MiniBiViewModel: ObservableObject {
 
     public func loadRecruitmentPosts(reset: Bool = true) async {
         await loadRecruitmentPostsInternal(reset: reset, isSnapshotInvalidRetry: false)
-        if reset && hasActiveRecruitmentPostFilter {
+        if reset && hasActiveRecruitmentPostFilter && !hasServerRecruitmentFacets {
             await ensureAllRecruitmentPostsLoadedForFiltering()
         }
     }
@@ -5180,10 +5259,15 @@ public final class MiniBiViewModel: ObservableObject {
         }
 
         let expectedFetchGen = recruitmentPostsFetchGeneration
+        let activeIndustrialParkId = selectedRecruitmentIndustrialParkId
+        let activeLaborTypeKey = selectedRecruitmentLaborTypeKey
         let res = await recruitmentPostService.listRecruitmentPosts(
             pageSize: RecruitmentPostContract.defaultPageSize,
             cursor: expectedCursor,
-            snapshotToken: expectedSnapshot
+            snapshotToken: expectedSnapshot,
+            industrialParkId: activeIndustrialParkId,
+            laborTypeKey: activeLaborTypeKey,
+            includeFacets: true
         )
         guard !Task.isCancelled,
               isSessionValid(token),
@@ -5208,18 +5292,45 @@ public final class MiniBiViewModel: ObservableObject {
                     current: recruitmentPosts,
                     incoming: page.items
                 )
-                if !page.industrialParks.isEmpty {
-                    recruitmentServerIndustrialParks.append(contentsOf: page.industrialParks)
-                }
                 recruitmentPostsSnapshotToken = expectedSnapshot
             } else {
                 recruitmentPosts = RecruitmentPostContract.mergeUniqueItems(
                     current: [],
                     incoming: page.items
                 )
-                recruitmentServerIndustrialParks = page.industrialParks
                 recruitmentPostsSnapshotToken = page.snapshotToken
             }
+
+            if let pageTotal = page.totalCount {
+                recruitmentTotalCount = pageTotal
+                if !hasActiveRecruitmentPostFilter || recruitmentCatalogTotalCount == nil {
+                    recruitmentCatalogTotalCount = pageTotal
+                }
+            } else if reset && !hasActiveRecruitmentPostFilter {
+                recruitmentTotalCount = nil
+                recruitmentCatalogTotalCount = nil
+            }
+
+            if !page.industrialParks.isEmpty {
+                if !hasActiveRecruitmentPostFilter
+                    || recruitmentServerIndustrialParks.isEmpty
+                    || page.industrialParks.count >= recruitmentServerIndustrialParks.count {
+                    recruitmentServerIndustrialParks = page.industrialParks
+                }
+            } else if reset && !hasActiveRecruitmentPostFilter {
+                recruitmentServerIndustrialParks = []
+            }
+
+            if !page.laborTypes.isEmpty {
+                if !hasActiveRecruitmentPostFilter
+                    || recruitmentServerLaborTypes.isEmpty
+                    || page.laborTypes.count >= recruitmentServerLaborTypes.count {
+                    recruitmentServerLaborTypes = page.laborTypes
+                }
+            } else if reset && !hasActiveRecruitmentPostFilter {
+                recruitmentServerLaborTypes = []
+            }
+
             recruitmentPostsHasMore = page.hasMore
             recruitmentPostsNextCursor = page.nextCursor
             recruitmentPostsError = nil
