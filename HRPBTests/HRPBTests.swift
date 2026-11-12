@@ -4812,7 +4812,8 @@ final class HRPBTests: XCTestCase {
 
     @MainActor
     func testRound7_LoginHandleDetectionAndRealVietnameseFullNameResolution() async throws {
-        // 1. Login handle detection rules
+        // 1. Login handle detection rules & HRPartner Brand Logo asset availability
+        XCTAssertNotNil(UIImage(named: "hrpartner_logo"), "hrpartner_logo asset must exist in main bundle for TopAppBar brand logo")
         XCTAssertTrue(MiniBiUser.looksLikeLoginHandle("sampt.td", username: "sampt.td"))
         XCTAssertTrue(MiniBiUser.looksLikeLoginHandle("sampt.td"))
         XCTAssertTrue(MiniBiUser.looksLikeLoginHandle("luanpt_01"))

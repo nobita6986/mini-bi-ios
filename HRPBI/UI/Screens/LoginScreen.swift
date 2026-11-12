@@ -49,12 +49,11 @@ public struct LoginScreen: View {
                                     RoundedRectangle(cornerRadius: HrpDesignTokens.radiusHero, style: .continuous)
                                         .stroke(SemanticColors.borderSubtle.opacity(0.85), lineWidth: 0.8)
                                 )
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(theme.primary)
-                                .frame(width: 50, height: 50)
-                            Text(env.appBrandBadgeText)
-                                .font(.system(size: 20, weight: .heavy, design: .rounded))
-                                .foregroundColor(.white)
+                            Image("hrpartner_logo")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 54, height: 54)
+                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
 
                         Text(env.appBrandTitle)

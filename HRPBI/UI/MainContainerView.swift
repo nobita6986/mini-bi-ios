@@ -53,13 +53,13 @@ public struct MainContainerView: View {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                                         .stroke(theme.topBarBorder.opacity(0.9), lineWidth: 0.8)
                                 )
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(theme.primary)
-                                .frame(width: 30, height: 30)
-                            Text(env.appBrandBadgeText)
-                                .font(.caption.weight(.heavy))
-                                .foregroundColor(.white)
+                            Image("hrpartner_logo")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 34, height: 34)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
+                        .accessibilityIdentifier("topbar_app_logo")
 
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 6) {
@@ -353,12 +353,11 @@ private struct BootstrapLaunchView: View {
                             RoundedRectangle(cornerRadius: HrpDesignTokens.radiusHero, style: .continuous)
                                 .stroke(SemanticColors.borderSubtle.opacity(0.85), lineWidth: 0.8)
                         )
-                    RoundedRectangle(cornerRadius: 15, style: .continuous)
-                        .fill(theme.primary)
-                        .frame(width: 54, height: 54)
-                    Text(env.appBrandBadgeText)
-                        .font(.system(size: 22, weight: .heavy, design: .rounded))
-                        .foregroundColor(.white)
+                    Image("hrpartner_logo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 58, height: 58)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
 
                 Text(env.appBrandTitle)
