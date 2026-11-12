@@ -837,6 +837,7 @@ public struct AttendanceScreen: View {
                             viewModel.selectAttendanceHistoryDate(newDate)
                         }
                     )
+                    .accessibilityIdentifier("checkin_history_date_bar")
 
                     if selectedDateSyncedItems.isEmpty {
                         HStack(spacing: 8) {
@@ -2894,6 +2895,7 @@ public struct AttendanceScreen: View {
                             viewModel.setExplanationSelectedDate(newDate)
                         }
                     )
+                    .accessibilityIdentifier("explanation_date_bar")
 
                     if let currentOverview = overview {
                         let dayEval = currentOverview.dayEvaluation
@@ -4066,24 +4068,30 @@ public struct AttendanceScreen: View {
     }
 
     private func explanationDatePickerSheet(theme: MiniBiThemePalette) -> some View {
-        NavigationStack {
+        let todayIsoVietnam = LeaveContract.todayVietnamIsoDate()
+        let todayDateVietnam = parseIsoDate(todayIsoVietnam) ?? Date()
+
+        return NavigationStack {
             VStack(alignment: .leading, spacing: 14) {
                 DatePicker(
                     "Chọn ngày chấm công",
                     selection: $explanationDatePickerSelection,
-                    in: ...Date(),
+                    in: ...todayDateVietnam,
                     displayedComponents: [.date]
                 )
                 .datePickerStyle(.graphical)
                 .environment(\.locale, Locale(identifier: "vi_VN"))
+                .environment(\.calendar, HrpDateNavigatorBar.vietnamCalendar)
 
                 Button {
                     let chosenIso = formatDateIso(explanationDatePickerSelection)
-                    viewModel.setExplanationSelectedDate(chosenIso)
+                    let clampedIso = chosenIso > todayIsoVietnam ? todayIsoVietnam : chosenIso
+                    viewModel.setExplanationSelectedDate(clampedIso)
                     isShowingExplanationDatePickerSheet = false
                 } label: {
                     let chosenIso = formatDateIso(explanationDatePickerSelection)
-                    Text("Xem ngày \(LeaveContract.formatIsoDateVi(chosenIso))")
+                    let clampedIso = chosenIso > todayIsoVietnam ? todayIsoVietnam : chosenIso
+                    Text("Xem ngày \(LeaveContract.formatIsoDateVi(clampedIso))")
                         .font(.subheadline.weight(.bold).monospacedDigit())
                         .frame(maxWidth: .infinity, minHeight: 46)
                         .background(

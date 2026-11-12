@@ -17,17 +17,24 @@ public struct RecruitmentPostIndustrialParkSummary: Identifiable, Equatable, Sen
     public let industrialParkCode: String
     public let displayName: String
     public let active: Bool
+    public var jobCount: Int
+
+    public var formattedLabel: String {
+        "\(displayName) (\(jobCount))"
+    }
 
     public init(
         industrialParkId: String,
         industrialParkCode: String,
         displayName: String,
-        active: Bool
+        active: Bool,
+        jobCount: Int = 0
     ) {
         self.industrialParkId = industrialParkId
         self.industrialParkCode = industrialParkCode
         self.displayName = displayName
         self.active = active
+        self.jobCount = jobCount
     }
 }
 
@@ -47,10 +54,16 @@ public struct RecruitmentPostLaborTypeSummary: Identifiable, Equatable, Sendable
     public var id: String { laborTypeKey }
     public let laborTypeKey: String
     public let displayName: String
+    public var jobCount: Int
 
-    public init(laborTypeKey: String, displayName: String) {
+    public var formattedLabel: String {
+        "\(displayName) (\(jobCount))"
+    }
+
+    public init(laborTypeKey: String, displayName: String, jobCount: Int = 0) {
         self.laborTypeKey = laborTypeKey
         self.displayName = displayName
+        self.jobCount = jobCount
     }
 }
 
@@ -158,6 +171,29 @@ public struct RecruitmentPostListResult: Equatable, Sendable {
     public let hasMore: Bool
     public let nextCursor: String?
     public let snapshotToken: String
+    public let totalCount: Int?
+    public let industrialParks: [RecruitmentPostIndustrialParkSummary]
+    public let laborTypes: [RecruitmentPostLaborTypeSummary]
+
+    public init(
+        items: [RecruitmentPostItem],
+        pageSize: Int,
+        hasMore: Bool,
+        nextCursor: String?,
+        snapshotToken: String,
+        totalCount: Int? = nil,
+        industrialParks: [RecruitmentPostIndustrialParkSummary] = [],
+        laborTypes: [RecruitmentPostLaborTypeSummary] = []
+    ) {
+        self.items = items
+        self.pageSize = pageSize
+        self.hasMore = hasMore
+        self.nextCursor = nextCursor
+        self.snapshotToken = snapshotToken
+        self.totalCount = totalCount
+        self.industrialParks = industrialParks
+        self.laborTypes = laborTypes
+    }
 }
 
 public struct RecruitmentPostCardViewModel: Equatable, Identifiable, Sendable {
@@ -462,6 +498,12 @@ public enum RecruitmentPostContract {
         "snapshot_token"
     ]
 
+    private static let listOptionalKeys: Set<String> = [
+        "total_count",
+        "industrial_parks",
+        "labor_types"
+    ]
+
     private static let detailDataKeys: Set<String> = ["post"]
 
     public static func errorMessageForCode(_ code: String?) -> String {
@@ -486,14 +528,27 @@ public enum RecruitmentPostContract {
     public static func buildListPath(
         pageSize: Int = defaultPageSize,
         cursor: String? = nil,
-        snapshotToken: String? = nil
+        snapshotToken: String? = nil,
+        industrialParkId: String? = nil,
+        laborTypeKey: String? = nil,
+        includeFacets: Bool = false
     ) -> String {
         let safePageSize = min(max(pageSize, 1), maxPageSize)
         var components = URLComponents()
         components.path = "/api/recruitment-posts"
-        var queryItems: [URLQueryItem] = [
-            URLQueryItem(name: "page_size", value: String(safePageSize))
-        ]
+        var queryItems: [URLQueryItem] = []
+        if includeFacets {
+            queryItems.append(URLQueryItem(name: "include_facets", value: "true"))
+        }
+        queryItems.append(URLQueryItem(name: "page_size", value: String(safePageSize)))
+        let cleanIndustrialParkId = industrialParkId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanIndustrialParkId.isEmpty {
+            queryItems.append(URLQueryItem(name: "industrial_park_id", value: cleanIndustrialParkId))
+        }
+        let cleanLaborTypeKey = laborTypeKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanLaborTypeKey.isEmpty {
+            queryItems.append(URLQueryItem(name: "labor_type_key", value: cleanLaborTypeKey))
+        }
         let cleanCursor = cursor?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let cleanSnapshot = snapshotToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !cleanCursor.isEmpty && !cleanSnapshot.isEmpty {
@@ -811,7 +866,11 @@ public enum RecruitmentPostContract {
     }
 
     public static func parseListData(_ data: [String: Any]) throws -> RecruitmentPostListResult {
-        try requireExactKeys(data, listDataKeys, label: "list data")
+        let actualKeys = Set(data.keys)
+        let allowedKeys = listDataKeys.union(listOptionalKeys)
+        if !listDataKeys.isSubset(of: actualKeys) || !actualKeys.isSubset(of: allowedKeys) {
+            throw RecruitmentPostContractError.invalidContract("Cấu trúc list data không khớp contract.")
+        }
         guard let rawItems = data["items"] as? [Any] else {
             throw RecruitmentPostContractError.invalidContract("Trường items phải là mảng.")
         }
@@ -843,12 +902,110 @@ public enum RecruitmentPostContract {
             items.append(parsed)
         }
 
+        let optionalTotalCount: Int?
+        if let rawTotal = data["total_count"], !(rawTotal is NSNull) {
+            optionalTotalCount = try requirePositiveInt(data, "total_count", min: 0, max: Int.max)
+        } else {
+            optionalTotalCount = nil
+        }
+
+        var optionalIndustrialParks: [RecruitmentPostIndustrialParkSummary] = []
+        if let rawParks = data["industrial_parks"] as? [Any] {
+            for elem in rawParks {
+                if let nameStr = elem as? String {
+                    let cleanName = nameStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !cleanName.isEmpty else { continue }
+                    optionalIndustrialParks.append(
+                        RecruitmentPostIndustrialParkSummary(
+                            industrialParkId: cleanName,
+                            industrialParkCode: cleanName,
+                            displayName: cleanName,
+                            active: true,
+                            jobCount: 0
+                        )
+                    )
+                } else if let obj = elem as? [String: Any] {
+                    let displayName = (
+                        (obj["display_name"] as? String)
+                        ?? (obj["industrial_park_name"] as? String)
+                        ?? (obj["name"] as? String)
+                        ?? ""
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !displayName.isEmpty else { continue }
+                    let parkId = (
+                        (obj["industrial_park_id"] as? String)
+                        ?? (obj["id"] as? String)
+                        ?? displayName
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let parkCode = (
+                        (obj["industrial_park_code"] as? String)
+                        ?? (obj["code"] as? String)
+                        ?? displayName
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let active = (obj["active"] as? Bool) ?? true
+                    let jobCount: Int
+                    if let countInt = obj["job_count"] as? Int {
+                        jobCount = max(0, countInt)
+                    } else if let num = obj["job_count"] as? NSNumber {
+                        jobCount = max(0, num.intValue)
+                    } else {
+                        jobCount = 0
+                    }
+                    optionalIndustrialParks.append(
+                        RecruitmentPostIndustrialParkSummary(
+                            industrialParkId: parkId.isEmpty ? displayName : parkId,
+                            industrialParkCode: parkCode.isEmpty ? displayName : parkCode,
+                            displayName: displayName,
+                            active: active,
+                            jobCount: jobCount
+                        )
+                    )
+                }
+            }
+        }
+
+        var optionalLaborTypes: [RecruitmentPostLaborTypeSummary] = []
+        if let rawLaborTypes = data["labor_types"] as? [Any] {
+            for elem in rawLaborTypes {
+                guard let obj = elem as? [String: Any] else { continue }
+                let key = (
+                    (obj["labor_type_key"] as? String)
+                    ?? (obj["key"] as? String)
+                    ?? ""
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                let displayName = (
+                    (obj["display_name"] as? String)
+                    ?? (obj["name"] as? String)
+                    ?? key
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty, !displayName.isEmpty else { continue }
+                let jobCount: Int
+                if let countInt = obj["job_count"] as? Int {
+                    jobCount = max(0, countInt)
+                } else if let num = obj["job_count"] as? NSNumber {
+                    jobCount = max(0, num.intValue)
+                } else {
+                    jobCount = 0
+                }
+                optionalLaborTypes.append(
+                    RecruitmentPostLaborTypeSummary(
+                        laborTypeKey: key,
+                        displayName: displayName,
+                        jobCount: jobCount
+                    )
+                )
+            }
+        }
+
         return RecruitmentPostListResult(
             items: items,
             pageSize: pageSize,
             hasMore: hasMore,
             nextCursor: nextCursor,
-            snapshotToken: snapshotToken
+            snapshotToken: snapshotToken,
+            totalCount: optionalTotalCount,
+            industrialParks: optionalIndustrialParks,
+            laborTypes: optionalLaborTypes
         )
     }
 
@@ -1365,12 +1522,18 @@ public final class RecruitmentPostService: @unchecked Sendable {
     public func listRecruitmentPosts(
         pageSize: Int = RecruitmentPostContract.defaultPageSize,
         cursor: String? = nil,
-        snapshotToken: String? = nil
+        snapshotToken: String? = nil,
+        industrialParkId: String? = nil,
+        laborTypeKey: String? = nil,
+        includeFacets: Bool = true
     ) async -> MiniBiApiResult<RecruitmentPostListResult> {
         let path = RecruitmentPostContract.buildListPath(
             pageSize: pageSize,
             cursor: cursor,
-            snapshotToken: snapshotToken
+            snapshotToken: snapshotToken,
+            industrialParkId: industrialParkId,
+            laborTypeKey: laborTypeKey,
+            includeFacets: includeFacets
         )
         let response = await httpClient.request(method: "GET", path: path)
         guard response.isSuccess, let root = response.jsonObject else {
