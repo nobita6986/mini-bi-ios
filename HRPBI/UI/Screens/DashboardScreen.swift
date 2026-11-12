@@ -671,7 +671,7 @@ private struct HiringPaceStripView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(9)
         .background(Color(hex: 0xF8FAFC))
-        .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusSM, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusXS, style: .continuous))
     }
 }
 
@@ -794,7 +794,7 @@ private struct TeamBucketPickerCard: View {
                             .frame(maxWidth: .infinity)
                             .background(isSelected ? theme.primary : SemanticColors.surfaceMuted)
                             .foregroundColor(isSelected ? .white : SemanticColors.textPrimary)
-                            .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusSM, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusXS, style: .continuous))
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -989,7 +989,7 @@ private struct TeamReportDetailCard: View {
                                 .padding(.vertical, 10)
                                 .background(theme.primaryLight)
                                 .foregroundColor(theme.primary)
-                                .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusSM, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusXS, style: .continuous))
                         }
                         .buttonStyle(.plain)
                     }
@@ -1011,7 +1011,7 @@ private struct TeamReportDetailCard: View {
                             .padding(.vertical, 10)
                             .background(SemanticColors.surfaceMuted)
                             .foregroundColor(theme.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusSM, style: .continuous))
+                            .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusXS, style: .continuous))
                         }
                         .disabled(isLoadingMoreDrillDown)
                         .buttonStyle(.plain)
