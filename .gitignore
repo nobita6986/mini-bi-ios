@@ -3,13 +3,24 @@
 *.xcworkspace/
 build/
 DerivedData/
+.swiftpm/
+releases/
+
+# Signed binaries & debug symbols
 *.ipa
 *.dSYM.zip
 *.dSYM
+
+# Apple signing certificates, keys & environment secrets (NEVER commit)
 *.p8
 *.p12
 *.mobileprovision
 *.cer
 *.certSigningRequest
 *.key
+.env
+
+# OS & local IDE metadata
 .DS_Store
+.aistudio/
+.codegraph/
