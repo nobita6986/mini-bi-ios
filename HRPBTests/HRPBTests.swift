@@ -5115,14 +5115,12 @@ final class HRPBTests: XCTestCase {
     @MainActor
     func testRound8_RecruitmentAutoLoadAllPagesAndKcnJobCountsAndDateNavigatorNoFutureDates() async throws {
         // 1. Verify HrpDateNavigatorBar never shows future dates when allowFutureDates == false
-        let calendar = HrpDateNavigatorBar.vietnamCalendar
         // 2026-11-12 is Thursday (T5)
         let days = HrpDateNavigatorBar.computeWeekDays(
             selectedDateIso: "2026-11-12",
             todayDateIso: "2026-11-12",
-            displayedWeekMondayIso: nil,
             allowFutureDates: false,
-            calendar: calendar
+            currentWindowEndIso: nil
         )
         XCTAssertEqual(days.count, 7)
         XCTAssertEqual(
@@ -5133,16 +5131,16 @@ final class HRPBTests: XCTestCase {
             days.map(\.weekdayShort),
             ["T6", "T7", "CN", "T2", "T3", "T4", "T5"]
         )
-        XCTAssertTrue(days.allSatisfy { !$0.isFuture && $0.id <= "2026-11-12" })
+        XCTAssertTrue(days.allSatisfy { !$0.isDisabled && $0.id <= "2026-11-12" })
         XCTAssertTrue(days.last?.isSelected == true)
         XCTAssertTrue(days.last?.isToday == true)
 
-        // Clamping window end when displayedWindowEndIso > todayDateIso
+        // Clamping window end when currentWindowEndIso > todayDateIso
         let clampedWindowEnd = HrpDateNavigatorBar.resolveWindowEndDateIso(
             selectedDateIso: "2026-11-10",
             todayDateIso: "2026-11-12",
-            displayedWindowEndIso: "2026-11-20",
-            calendar: calendar
+            allowFutureDates: false,
+            currentWindowEndIso: "2026-11-20"
         )
         XCTAssertEqual(clampedWindowEnd, "2026-11-12")
 
@@ -5150,9 +5148,8 @@ final class HRPBTests: XCTestCase {
         let futureAllowedDays = HrpDateNavigatorBar.computeWeekDays(
             selectedDateIso: "2026-11-12",
             todayDateIso: "2026-11-12",
-            displayedWeekMondayIso: nil,
             allowFutureDates: true,
-            calendar: calendar
+            currentWindowEndIso: nil
         )
         XCTAssertEqual(
             futureAllowedDays.map(\.id),
@@ -5293,8 +5290,8 @@ final class HRPBTests: XCTestCase {
 
         // Work report history date clamps future date to todayVietnamIsoDate
         let todayIso = LeaveContract.todayVietnamIsoDate()
-        vm.workReportSelectedDateIso = "2099-12-31"
+        vm.workReportHistorySelectedDate = "2099-12-31"
         vm.selectWorkReportHistoryDate("2099-12-31")
-        XCTAssertEqual(vm.workReportSelectedDateIso, todayIso)
+        XCTAssertEqual(vm.workReportHistorySelectedDate, todayIso)
     }
 }
