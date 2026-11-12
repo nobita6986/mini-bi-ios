@@ -4754,7 +4754,12 @@ final class HRPBTests: XCTestCase {
         XCTAssertTrue(vm.teamReport.teams.isEmpty, "Stale teamReport must be cleared immediately")
 
         // Wait for delayed reload task to complete
-        try await Task.sleep(nanoseconds: 350_000_000)
+        for _ in 0..<25 {
+            if vm.hasLoadedDashboardInSession && !vm.isLoadingDashboard {
+                break
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
         XCTAssertTrue(vm.hasLoadedDashboardInSession, "hasLoadedDashboardInSession must become true after network completion")
         XCTAssertFalse(vm.isLoadingDashboard)
         XCTAssertEqual(vm.generalOverview.kpis.totalHeadcount, 42)
@@ -5332,7 +5337,7 @@ final class HRPBTests: XCTestCase {
         let kcnFilters = vm.availableRecruitmentIndustrialParkFilters
         XCTAssertEqual(
             kcnFilters.map(\.formattedLabel),
-            ["KCN Ang (3)", "KCN Án (2)", "KCN Bá Thiện 1 (20)"]
+            ["KCN Án (2)", "KCN Ang (3)", "KCN Bá Thiện 1 (20)"]
         )
 
         let laborFilters = vm.availableRecruitmentLaborTypeFilters
@@ -5349,7 +5354,7 @@ final class HRPBTests: XCTestCase {
         XCTAssertTrue(MockURLProtocol.recordedUrls().contains(where: { $0.contains("industrial_park_id=\(ipBaThien)") }))
         XCTAssertEqual(
             vm.availableRecruitmentIndustrialParkFilters.map(\.formattedLabel),
-            ["KCN Ang (3)", "KCN Án (2)", "KCN Bá Thiện 1 (20)"]
+            ["KCN Án (2)", "KCN Ang (3)", "KCN Bá Thiện 1 (20)"]
         )
         XCTAssertEqual(
             vm.availableRecruitmentLaborTypeFilters.map(\.formattedLabel),

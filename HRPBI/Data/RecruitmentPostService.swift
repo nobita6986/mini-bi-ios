@@ -531,7 +531,7 @@ public enum RecruitmentPostContract {
         snapshotToken: String? = nil,
         industrialParkId: String? = nil,
         laborTypeKey: String? = nil,
-        includeFacets: Bool = true
+        includeFacets: Bool = false
     ) -> String {
         let safePageSize = min(max(pageSize, 1), maxPageSize)
         var components = URLComponents()
