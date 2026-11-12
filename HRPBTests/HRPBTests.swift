@@ -4872,10 +4872,10 @@ final class HRPBTests: XCTestCase {
         let keychain = KeychainStore(serviceName: "com.aistudio.minibi.r7sam.\(UUID().uuidString)")
         let client = makeMockHttpClient()
         let repo = MiniBiRepository(httpClient: client, keychain: keychain)
-        repo.saveOrUpdateLoginAccount(username: "sampt.td", password: "secret", displayName: "sampt.td")
+        repo.saveLoginAccount(identifier: "sampt.td", password: "secret", displayName: "sampt.td")
 
-        let loginResult = await repo.login(username: "sampt.td", password: "secret")
-        guard case .success(let loggedInUser) = loginResult else {
+        let loginResult = await repo.login(identifier: "sampt.td", password: "secret")
+        guard case .success(let loggedInUser, _) = loginResult else {
             XCTFail("Expected login success")
             return
         }
@@ -4887,7 +4887,7 @@ final class HRPBTests: XCTestCase {
 
         // Subsequent session restore hits Keychain cache immediately without calling /api/attendance/history again
         let sessionResult = await repo.fetchCurrentUser()
-        guard case .success(let restoredUser) = sessionResult else {
+        guard case .success(let restoredUser, _) = sessionResult else {
             XCTFail("Expected fetchCurrentUser success")
             return
         }
@@ -4952,7 +4952,7 @@ final class HRPBTests: XCTestCase {
         let keychain2 = KeychainStore(serviceName: "com.aistudio.minibi.r7sam2.\(UUID().uuidString)")
         let repo2 = MiniBiRepository(httpClient: client, keychain: keychain2)
         let sessionResult2 = await repo2.fetchCurrentUser()
-        guard case .success(let catalogResolvedUser) = sessionResult2 else {
+        guard case .success(let catalogResolvedUser, _) = sessionResult2 else {
             XCTFail("Expected fetchCurrentUser success via catalog fallback")
             return
         }
