@@ -4955,6 +4955,47 @@ public final class MiniBiViewModel: ObservableObject {
         return recruitmentPosts.count
     }
 
+    public var recruitmentHeaderBadgeText: String? {
+        let totalCatalogJobs = recruitmentCatalogTotalJobCount
+        guard !recruitmentPosts.isEmpty || totalCatalogJobs > 0 else {
+            return nil
+        }
+        if hasActiveRecruitmentPostFilter {
+            let filteredTotal: Int
+            if let serverTotal = recruitmentTotalCount, hasServerRecruitmentFacets {
+                filteredTotal = serverTotal
+            } else {
+                filteredTotal = filteredRecruitmentPosts.count
+            }
+            return "\(filteredTotal)/\(max(totalCatalogJobs, filteredTotal))"
+        }
+        return "\(max(totalCatalogJobs, recruitmentPosts.count))"
+    }
+
+    private func syncProjectedRecruitmentTotalCountForActiveFilter() {
+        guard hasServerRecruitmentFacets else { return }
+        let kcnId = selectedRecruitmentIndustrialParkId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let laborKey = selectedRecruitmentLaborTypeKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if kcnId.isEmpty && laborKey.isEmpty {
+            if let catalogTotal = recruitmentCatalogTotalCount {
+                recruitmentTotalCount = catalogTotal
+            }
+        } else if !kcnId.isEmpty && laborKey.isEmpty {
+            if let matchedKcn = availableRecruitmentIndustrialParkFilters.first(where: {
+                $0.industrialParkId.caseInsensitiveCompare(kcnId) == .orderedSame
+                    || $0.displayName.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(kcnId) == .orderedSame
+            }) {
+                recruitmentTotalCount = matchedKcn.jobCount
+            }
+        } else if kcnId.isEmpty && !laborKey.isEmpty {
+            if let matchedLabor = availableRecruitmentLaborTypeFilters.first(where: {
+                $0.laborTypeKey == laborKey
+            }) {
+                recruitmentTotalCount = matchedLabor.jobCount
+            }
+        }
+    }
+
     public var availableRecruitmentIndustrialParkFilters: [RecruitmentPostIndustrialParkSummary] {
         var result: [RecruitmentPostIndustrialParkSummary] = []
         var indexById: [String: Int] = [:]
@@ -5105,6 +5146,7 @@ public final class MiniBiViewModel: ObservableObject {
         let newValue: String? = clean.isEmpty ? nil : clean
         let changed = selectedRecruitmentIndustrialParkId != newValue
         selectedRecruitmentIndustrialParkId = newValue
+        syncProjectedRecruitmentTotalCountForActiveFilter()
         if hasServerRecruitmentFacets {
             if changed {
                 await loadRecruitmentPosts(reset: true)
@@ -5119,6 +5161,7 @@ public final class MiniBiViewModel: ObservableObject {
         let newValue: String? = clean.isEmpty ? nil : clean
         let changed = selectedRecruitmentLaborTypeKey != newValue
         selectedRecruitmentLaborTypeKey = newValue
+        syncProjectedRecruitmentTotalCountForActiveFilter()
         if hasServerRecruitmentFacets {
             if changed {
                 await loadRecruitmentPosts(reset: true)
@@ -5132,6 +5175,7 @@ public final class MiniBiViewModel: ObservableObject {
         let wasFiltering = hasActiveRecruitmentPostFilter
         selectedRecruitmentIndustrialParkId = nil
         selectedRecruitmentLaborTypeKey = nil
+        syncProjectedRecruitmentTotalCountForActiveFilter()
         if wasFiltering && hasServerRecruitmentFacets {
             Task { await loadRecruitmentPosts(reset: true) }
         }

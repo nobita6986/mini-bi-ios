@@ -5330,6 +5330,8 @@ final class HRPBTests: XCTestCase {
         XCTAssertTrue(vm.recruitmentPostsHasMore)
         XCTAssertEqual(vm.recruitmentTotalCount, 25)
         XCTAssertEqual(vm.recruitmentCatalogTotalJobCount, 25)
+        XCTAssertEqual(vm.recruitmentHeaderBadgeText, "25")
+        XCTAssertFalse(vm.recruitmentHeaderBadgeText?.contains("+") == true)
         XCTAssertTrue(MockURLProtocol.recordedUrls().contains(where: { $0.contains("include_facets=true") && $0.contains("page_size=10") }))
         XCTAssertFalse(MockURLProtocol.recordedUrls().contains(where: { $0.contains("cursor=\(cursor1)") }))
 
@@ -5351,6 +5353,7 @@ final class HRPBTests: XCTestCase {
         XCTAssertEqual(vm.filteredRecruitmentPosts.count, 2)
         XCTAssertEqual(vm.recruitmentTotalCount, 20)
         XCTAssertEqual(vm.recruitmentCatalogTotalJobCount, 25)
+        XCTAssertEqual(vm.recruitmentHeaderBadgeText, "20/25")
         XCTAssertTrue(MockURLProtocol.recordedUrls().contains(where: { $0.contains("industrial_park_id=\(ipBaThien)") }))
         XCTAssertEqual(
             vm.availableRecruitmentIndustrialParkFilters.map(\.formattedLabel),

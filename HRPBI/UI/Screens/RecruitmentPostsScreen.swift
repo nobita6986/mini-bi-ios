@@ -39,11 +39,7 @@ public struct RecruitmentPostsScreen: View {
                         .font(.subheadline.weight(.bold))
                         .foregroundColor(SemanticColors.textPrimary)
 
-                    if !allCards.isEmpty || totalCatalogJobs > 0 {
-                        let filteredTotal = viewModel.recruitmentTotalCount ?? filteredCards.count
-                        let countBadgeText = isFiltering
-                            ? "\(filteredTotal)/\(max(totalCatalogJobs, filteredTotal))"
-                            : "\(allCards.count)\(viewModel.recruitmentPostsHasMore ? "+" : "")"
+                    if let countBadgeText = viewModel.recruitmentHeaderBadgeText {
                         Text(countBadgeText)
                             .font(.caption2.weight(.bold).monospacedDigit())
                             .padding(.horizontal, 8)
