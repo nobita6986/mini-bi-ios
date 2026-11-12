@@ -1028,7 +1028,7 @@ public final class MiniBiRepository {
 
     public static func parseWorkerItem(_ obj: [String: Any]) -> WorkerItem {
         let empStatusDict = obj["employment_status"] as? [String: Any]
-        let employmentStatusRaw = (empStatusDict?.optString("status") ?? obj.optString("employment_status", "trang_thai", "status")).uppercased()
+        let employmentStatusRaw = (empStatusDict?.optString("status", "code") ?? obj.optString("employment_status", "employment_status_code", "employmentStatusCode", "trang_thai", "status")).uppercased()
         let trangThaiDisplay: String = {
             switch employmentStatusRaw {
             case "ON": return "Đang làm việc"

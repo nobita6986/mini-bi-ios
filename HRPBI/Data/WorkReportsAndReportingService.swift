@@ -1469,9 +1469,22 @@ public final class WorkReportsAndReportingService {
                     if let obj = val as? [String: Any] {
                         let count = obj.optInt("recruitedCount", "recruited_count", "total_count", "totalCount", "eligible_episode_count", "count", "total")
                         guard count > 0 else { continue }
-                        let itemKey = obj.optString("key", "id", "code", defaultValue: mapKey)
+                        let itemKey = obj.optString(
+                            "key", "recruiterKey", "recruiter_key", "projectKey", "project_key",
+                            "employmentTypeKey", "employment_type_key", "providerTypeKey", "provider_type_key",
+                            "project_id", "recruiter_id", "id", "code",
+                            defaultValue: mapKey
+                        )
                         let display = normalizeBucketDisplay(
-                            rawDisplay: obj.optString("display", "displayName", "display_name", "label", "name", defaultValue: itemKey),
+                            rawDisplay: obj.optString(
+                                "display", "displayName", "display_name",
+                                "recruiterDisplay", "recruiter_display",
+                                "projectDisplay", "project_display",
+                                "employmentTypeDisplay", "employment_type_display",
+                                "providerTypeDisplay", "provider_type_display",
+                                "label", "name",
+                                defaultValue: itemKey
+                            ),
                             fallbackKey: itemKey
                         )
                         let onCnt = obj.optNullableInt("on_count", "onCount", "active_count")
@@ -1490,9 +1503,22 @@ public final class WorkReportsAndReportingService {
                 let parsed = arr.compactMap { obj -> (key: String, display: String, totalCount: Int, onCount: Int?, offCount: Int?, unconfirmedCount: Int?)? in
                     let count = obj.optInt("recruitedCount", "recruited_count", "total_count", "totalCount", "eligible_episode_count", "count", "total")
                     guard count > 0 else { return nil }
-                    let itemKey = obj.optString("key", "project_id", "recruiter_id", "code", "id", defaultValue: "unknown")
+                    let itemKey = obj.optString(
+                        "key", "recruiterKey", "recruiter_key", "projectKey", "project_key",
+                        "employmentTypeKey", "employment_type_key", "providerTypeKey", "provider_type_key",
+                        "project_id", "recruiter_id", "code", "id",
+                        defaultValue: "unknown"
+                    )
                     let display = normalizeBucketDisplay(
-                        rawDisplay: obj.optString("display", "displayName", "display_name", "project_display", "recruiter_display", "label", "name", defaultValue: itemKey),
+                        rawDisplay: obj.optString(
+                            "display", "displayName", "display_name",
+                            "recruiterDisplay", "recruiter_display",
+                            "projectDisplay", "project_display",
+                            "employmentTypeDisplay", "employment_type_display",
+                            "providerTypeDisplay", "provider_type_display",
+                            "label", "name",
+                            defaultValue: itemKey
+                        ),
                         fallbackKey: itemKey
                     )
                     let onCnt = obj.optNullableInt("on_count", "onCount", "active_count")
@@ -3002,7 +3028,7 @@ public final class WorkReportsAndReportingService {
             var seenInScope: Set<String> = []
             var scopeItems: [WorkerItem] = []
             var cursor: String? = nil
-            for page in 1...10 {
+            pageLoop: for page in 1...10 {
                 let res = await repo.fetchWorkers(
                     scope: sc,
                     cursor: cursor,
@@ -3022,17 +3048,14 @@ public final class WorkReportsAndReportingService {
                     let nextCur = (wData.nextCursor ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     let hasMorePages = wData.hasMore || !nextCur.isEmpty
                     if !hasMorePages || addedInPage == 0 {
-                        break
+                        break pageLoop
                     }
                     cursor = nextCur.isEmpty ? nil : nextCur
                 case .failure(let message, let httpStatus, let errorCode, _):
                     if firstError == nil {
                         firstError = (message, httpStatus ?? 0, errorCode)
                     }
-                    break
-                }
-                if firstError != nil && scopeItems.isEmpty {
-                    break
+                    break pageLoop
                 }
             }
             if isPeriodFiltered {

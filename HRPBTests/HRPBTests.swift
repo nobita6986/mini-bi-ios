@@ -3965,6 +3965,7 @@ final class HRPBTests: XCTestCase {
         let recordedAfterOpen = MockURLProtocol.recordedUrls()
         // Zero Dashboard endpoints called on app open / login!
         XCTAssertFalse(recordedAfterOpen.contains(where: { $0.contains("/api/reporting/") }))
+        XCTAssertFalse(recordedAfterOpen.contains(where: { $0.contains("/api/direct-entry/workers") }))
         XCTAssertFalse(recordedAfterOpen.contains(where: { $0.contains("/api/cccd-review") }))
         // Initial Attendance time anchor and history each called at most once!
         XCTAssertEqual(recordedAfterOpen.filter { $0.contains("/api/attendance/time") }.count, 1)
@@ -3979,7 +3980,7 @@ final class HRPBTests: XCTestCase {
         // 3. Switching to `.dashboard` loads Dashboard data lazily on demand
         vm.navigateTo(.dashboard)
         XCTAssertEqual(vm.currentDestination, .dashboard)
-        try await waitForRecordedUrl(containing: "/api/reporting/")
+        try await waitForRecordedUrl(containing: "/api/direct-entry/workers")
         await vm.performLogout()
     }
 
@@ -5425,12 +5426,13 @@ final class HRPBTests: XCTestCase {
                 let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
                 return (resp, Data(body.utf8))
             } else if path == "/api/reporting/team-report" {
-                if query.contains("team_2") && query.contains("from=") {
+                let isTeam2 = query.contains("team_2") || query.contains("dGVhbV8y")
+                if isTeam2 && query.contains("from=") {
                     // Simulate server returning 400 INVALID_FILTER when team_2 has 0 new recruits in filtered period
                     let errBody = #"{"ok":false,"error":{"code":"INVALID_FILTER","message":"No rows in period"}}"#
                     let resp = HTTPURLResponse(url: url, statusCode: 400, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
                     return (resp, Data(errBody.utf8))
-                } else if query.contains("team_2") {
+                } else if isTeam2 {
                     let body = """
                     {
                       "ok": true,
