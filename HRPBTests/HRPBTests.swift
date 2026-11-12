@@ -5162,50 +5162,53 @@ final class HRPBTests: XCTestCase {
         let snap1 = "dddd0001-2222-4333-8444-555555555501"
         let cursor1 = "eeee0001-2222-4333-8444-555555555501"
 
-        func makeItemJson(idx: Int, ipId: String, ipName: String, laborKey: String, laborLabel: String) -> String {
-            let briefId = String(format: "aaaa00%02d-2222-4333-8444-555555555500", idx)
-            return """
-            {
-              "brief_id": "\(briefId)",
-              "client": { "client_id": "22222222-2222-4333-8444-555555555501", "display_name": "Compal \(idx)", "short_code": "CP\(idx)" },
-              "industrial_park": { "industrial_park_id": "\(ipId)", "display_name": "\(ipName)" },
-              "labor_type": { "key": "\(laborKey)", "display_name": "\(laborLabel)" },
-              "gender_requirement": "Nam & Nữ",
-              "age_range": { "min_age": 18, "max_age": 38, "display_text": "18 - 38 tuổi" },
-              "headcount_needed": 50,
-              "recruitment_status": "OPEN",
-              "published_at": "2026-04-19T08:00:00Z",
-              "updated_at": "2026-04-19T08:30:00Z",
-              "summary_preview": {
-                "income_highlight": "9 - 12 triệu",
-                "shift_highlight": "2 ca",
-                "key_allowance_preview": "Phụ cấp chuyên cần",
-                "interview_schedule_preview": "Phỏng vấn hàng ngày"
-              }
-            }
-            """
+        func makeItemJson(idx: Int, ipId: String, ipCode: String, ipName: String, laborKey: String, laborLabel: String) -> String {
+            let briefId = String(format: "888800%02d-2222-4333-8444-555555555500", idx)
+            return Self.makeRecruitmentPostJson(
+                briefId: briefId,
+                projectName: "Compal \(idx)",
+                creatorName: "Phạm Thái Sâm",
+                managerName: "Quản Lý \(idx)",
+                industrialParkId: ipId,
+                industrialParkCode: ipCode,
+                industrialParkName: ipName,
+                laborTypesJson: #"{"labor_type_key": "\#(laborKey)", "display_name": "\#(laborLabel)"}"#
+            )
         }
 
         let page1Items = [
-            makeItemJson(idx: 1, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
-            makeItemJson(idx: 2, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
-            makeItemJson(idx: 3, ipId: ipBaThien, ipName: "KCN Bá Thiện 1", laborKey: "THOI_VU", laborLabel: "Thời vụ")
+            makeItemJson(idx: 1, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 2, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 3, ipId: ipBaThien, ipCode: "KCN_BA_THIEN_1", ipName: "KCN Bá Thiện 1", laborKey: "THOI_VU", laborLabel: "Thời vụ")
         ].joined(separator: ",")
 
         let page2Items = [
-            makeItemJson(idx: 4, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
-            makeItemJson(idx: 5, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "THOI_VU", laborLabel: "Thời vụ"),
-            makeItemJson(idx: 6, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
-            makeItemJson(idx: 7, ipId: ipBaThien, ipName: "KCN Bá Thiện 1", laborKey: "THOI_VU", laborLabel: "Thời vụ")
+            makeItemJson(idx: 4, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 5, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "THOI_VU", laborLabel: "Thời vụ"),
+            makeItemJson(idx: 6, ipId: ipKhaiQuang, ipCode: "KCN_KHAI_QUANG", ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 7, ipId: ipBaThien, ipCode: "KCN_BA_THIEN_1", ipName: "KCN Bá Thiện 1", laborKey: "THOI_VU", laborLabel: "Thời vụ")
         ].joined(separator: ",")
 
+        MockURLProtocol.resetRecordedUrls()
         MockURLProtocol.requestHandler = { request in
-            let url = request.url!
-            let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            let cursor = comps?.queryItems?.first(where: { $0.name == "cursor" })?.value
+            let url = try XCTUnwrap(request.url)
+            let fullUrl = url.absoluteString
             let body: String
-            if url.path.hasSuffix("/api/mobile/v1/recruitment-posts") {
-                if cursor == nil {
+            if fullUrl.contains("/api/recruitment-posts?") {
+                if fullUrl.contains("cursor=\(cursor1)") {
+                    body = """
+                    {
+                      "ok": true,
+                      "data": {
+                        "items": [\(page2Items)],
+                        "page_size": 10,
+                        "next_cursor": null,
+                        "has_more": false,
+                        "snapshot_token": "\(snap1)"
+                      }
+                    }
+                    """
+                } else {
                     body = """
                     {
                       "ok": true,
@@ -5216,24 +5219,11 @@ final class HRPBTests: XCTestCase {
                           { "industrial_park_id": "\(ipBaThien)", "display_name": "KCN Bá Thiện 1" },
                           "KCN Thăng Long 3"
                         ],
+                        "page_size": 10,
                         "next_cursor": "\(cursor1)",
                         "has_more": true,
                         "snapshot_token": "\(snap1)"
-                      },
-                      "meta": { "request_id": "req-r8-p1", "server_time": "2026-04-19T09:00:00Z" }
-                    }
-                    """
-                } else {
-                    body = """
-                    {
-                      "ok": true,
-                      "data": {
-                        "items": [\(page2Items)],
-                        "next_cursor": null,
-                        "has_more": false,
-                        "snapshot_token": "\(snap1)"
-                      },
-                      "meta": { "request_id": "req-r8-p2", "server_time": "2026-04-19T09:00:01Z" }
+                      }
                     }
                     """
                 }
