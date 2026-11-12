@@ -5278,6 +5278,21 @@ final class HRPBTests: XCTestCase {
         await vm.selectRecruitmentIndustrialParkFilter(ipKhaiQuang)
         XCTAssertEqual(vm.filteredRecruitmentPosts.count, 5)
 
+        // Reset state and simulate tapping "Tuyển dụng" tab (`navigateTo(.recruitment)`) concurrent with `.task`
+        vm.resetRecruitmentPostsState()
+        vm.navigateTo(.recruitment)
+        await vm.loadRecruitmentPostsAndAllPages(reset: false)
+        XCTAssertEqual(vm.recruitmentPosts.count, 7)
+        XCTAssertFalse(vm.recruitmentPostsHasMore)
+        XCTAssertEqual(
+            vm.availableRecruitmentIndustrialParkFilters.map(\.formattedLabel),
+            ["KCN Bá Thiện 1 (2)", "KCN Khai Quang (5)", "KCN Thăng Long 3 (0)"]
+        )
+        XCTAssertEqual(
+            vm.availableRecruitmentLaborTypeFilters.map(\.formattedLabel),
+            ["Chính thức (4)", "Thời vụ (3)"]
+        )
+
         // Work report history date clamps future date to todayVietnamIsoDate
         let todayIso = LeaveContract.todayVietnamIsoDate()
         vm.workReportHistorySelectedDate = "2099-12-31"

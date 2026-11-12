@@ -640,11 +640,9 @@ public final class MiniBiViewModel: ObservableObject {
             }
         } else if destination == .recruitment {
             if isAuthenticated
-                && recruitmentPosts.isEmpty
-                && !recruitmentPostsLoading
                 && !recruitmentPostsAccessDenied
                 && !recruitmentPostsFeatureUnavailable {
-                Task { await loadRecruitmentPosts(reset: true) }
+                Task { await loadRecruitmentPostsAndAllPages(reset: false) }
             }
         } else if destination == .newEntry {
             if isAuthenticated && currentUser?.canLoadDirectEntryCatalog == true && directEntryOptions.catalogProjects.isEmpty {
@@ -924,9 +922,7 @@ public final class MiniBiViewModel: ObservableObject {
                     await self.loadSalaryAdvanceContext()
                 }
             case .recruitment:
-                if self.recruitmentPosts.isEmpty {
-                    await self.loadRecruitmentPosts(reset: true)
-                }
+                await self.loadRecruitmentPostsAndAllPages(reset: false)
             case .newEntry:
                 if self.currentUser?.canLoadDirectEntryCatalog == true && self.directEntryOptions.catalogProjects.isEmpty {
                     await self.loadDirectEntryAssigneeOptions()
@@ -5052,11 +5048,16 @@ public final class MiniBiViewModel: ObservableObject {
 
     public func ensureAllRecruitmentPostsLoaded(maxPages: Int = 50) async {
         let safeMaxPages = max(1, maxPages)
+        while (recruitmentPostsLoading || recruitmentPostsLoadingMore) && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
         var loadedPages = 0
         while recruitmentPostsHasMore && loadedPages < safeMaxPages {
+            while (recruitmentPostsLoading || recruitmentPostsLoadingMore) && !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
             guard !Task.isCancelled,
-                  !recruitmentPostsLoading,
-                  !recruitmentPostsLoadingMore,
+                  recruitmentPostsHasMore,
                   !recruitmentPostsAccessDenied,
                   !recruitmentPostsFeatureUnavailable else {
                 break
@@ -5073,6 +5074,21 @@ public final class MiniBiViewModel: ObservableObject {
                 break
             }
         }
+    }
+
+    public func loadRecruitmentPostsAndAllPages(reset: Bool = false) async {
+        let task = Task { @MainActor in
+            if reset {
+                await self.loadRecruitmentPosts(reset: true)
+            } else if self.recruitmentPosts.isEmpty
+                && !self.recruitmentPostsLoading
+                && !self.recruitmentPostsAccessDenied
+                && !self.recruitmentPostsFeatureUnavailable {
+                await self.loadRecruitmentPosts(reset: true)
+            }
+            await self.ensureAllRecruitmentPostsLoaded()
+        }
+        await task.value
     }
 
     public func ensureAllRecruitmentPostsLoadedForFiltering(maxPages: Int = 50) async {
@@ -5172,6 +5188,10 @@ public final class MiniBiViewModel: ObservableObject {
         guard !Task.isCancelled,
               isSessionValid(token),
               recruitmentPostsFetchGeneration == expectedFetchGen else {
+            if recruitmentPostsFetchGeneration == expectedFetchGen {
+                recruitmentPostsLoading = false
+                recruitmentPostsLoadingMore = false
+            }
             return
         }
 

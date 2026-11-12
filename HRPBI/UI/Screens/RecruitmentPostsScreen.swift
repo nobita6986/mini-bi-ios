@@ -2,6 +2,7 @@ import SwiftUI
 
 public struct RecruitmentPostsScreen: View {
     @ObservedObject var viewModel: MiniBiViewModel
+    @State private var visibleUnfilteredCount: Int = RecruitmentPostContract.defaultPageSize
 
     public init(viewModel: MiniBiViewModel) {
         self.viewModel = viewModel
@@ -12,6 +13,11 @@ public struct RecruitmentPostsScreen: View {
         let allCards = viewModel.recruitmentPosts.map { RecruitmentPostContract.toCardViewModel($0) }
         let filteredCards = viewModel.filteredRecruitmentPosts.map { RecruitmentPostContract.toCardViewModel($0) }
         let isFiltering = viewModel.hasActiveRecruitmentPostFilter
+        let displayedCards = isFiltering
+            ? filteredCards
+            : Array(filteredCards.prefix(max(RecruitmentPostContract.defaultPageSize, visibleUnfilteredCount)))
+        let hasMoreToDisplayOrLoad = (!isFiltering && displayedCards.count < filteredCards.count)
+            || viewModel.recruitmentPostsHasMore
         let kcnOptions = viewModel.availableRecruitmentIndustrialParkFilters
         let laborTypeOptions = viewModel.availableRecruitmentLaborTypeFilters
         let selectedKcnOption = kcnOptions.first(where: { opt in
@@ -233,8 +239,8 @@ public struct RecruitmentPostsScreen: View {
                     theme: theme,
                     onAction: {
                         Task {
-                            await viewModel.loadRecruitmentPosts(reset: true)
-                            await viewModel.ensureAllRecruitmentPostsLoaded()
+                            visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
+                            await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
                         }
                     }
                 )
@@ -283,15 +289,18 @@ public struct RecruitmentPostsScreen: View {
                         actionTitle: "Thử lại",
                         theme: theme,
                         onAction: {
-                            Task { await viewModel.loadRecruitmentPosts(reset: true) }
+                            Task {
+                                visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
+                                await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
+                            }
                         }
                     )
                     .frame(minHeight: 360)
                 }
                 .refreshable {
                     await viewModel.performRefreshable {
-                        await viewModel.loadRecruitmentPosts(reset: true)
-                        await viewModel.ensureAllRecruitmentPostsLoaded()
+                        visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
+                        await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
                     }
                 }
             } else if allCards.isEmpty {
@@ -308,8 +317,8 @@ public struct RecruitmentPostsScreen: View {
                 }
                 .refreshable {
                     await viewModel.performRefreshable {
-                        await viewModel.loadRecruitmentPosts(reset: true)
-                        await viewModel.ensureAllRecruitmentPostsLoaded()
+                        visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
+                        await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
                     }
                 }
             } else if filteredCards.isEmpty {
@@ -329,8 +338,8 @@ public struct RecruitmentPostsScreen: View {
                 }
                 .refreshable {
                     await viewModel.performRefreshable {
-                        await viewModel.loadRecruitmentPosts(reset: true)
-                        await viewModel.ensureAllRecruitmentPostsLoaded()
+                        visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
+                        await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
                     }
                 }
             } else {
@@ -348,8 +357,7 @@ public struct RecruitmentPostsScreen: View {
                                         if viewModel.recruitmentPostsHasMore {
                                             await viewModel.ensureAllRecruitmentPostsLoaded()
                                         } else {
-                                            await viewModel.loadRecruitmentPosts(reset: true)
-                                            await viewModel.ensureAllRecruitmentPostsLoaded()
+                                            await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
                                         }
                                     }
                                 }
@@ -361,7 +369,7 @@ public struct RecruitmentPostsScreen: View {
                             .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous))
                         }
 
-                        ForEach(Array(filteredCards.enumerated()), id: \.element.id) { idx, card in
+                        ForEach(Array(displayedCards.enumerated()), id: \.element.id) { idx, card in
                             RecruitmentPostSummaryCardView(
                                 index: idx + 1,
                                 card: card,
@@ -373,14 +381,21 @@ public struct RecruitmentPostsScreen: View {
                             )
                         }
 
-                        if viewModel.recruitmentPostsHasMore {
+                        if hasMoreToDisplayOrLoad {
                             HrpLoadMoreButton(
-                                loadedCount: allCards.count,
-                                totalCount: nil,
+                                loadedCount: displayedCards.count,
+                                totalCount: allCards.count > displayedCards.count ? allCards.count : nil,
                                 isLoading: viewModel.recruitmentPostsLoadingMore,
                                 theme: theme
                             ) {
-                                Task { await viewModel.loadMoreRecruitmentPosts() }
+                                if !isFiltering && displayedCards.count < filteredCards.count {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        visibleUnfilteredCount += RecruitmentPostContract.defaultPageSize
+                                    }
+                                }
+                                if viewModel.recruitmentPostsHasMore {
+                                    Task { await viewModel.ensureAllRecruitmentPostsLoaded() }
+                                }
                             }
                             .disabled(viewModel.recruitmentPostsLoading || viewModel.recruitmentPostsLoadingMore)
                             .accessibilityIdentifier("recruitment_posts_load_more_button")
@@ -390,22 +405,19 @@ public struct RecruitmentPostsScreen: View {
                 }
                 .refreshable {
                     await viewModel.performRefreshable {
-                        await viewModel.loadRecruitmentPosts(reset: true)
-                        await viewModel.ensureAllRecruitmentPostsLoaded()
+                        visibleUnfilteredCount = RecruitmentPostContract.defaultPageSize
+                        await viewModel.loadRecruitmentPostsAndAllPages(reset: true)
                     }
                 }
             }
         }
         .background(theme.background)
         .task {
-            if viewModel.recruitmentPosts.isEmpty
-                && !viewModel.recruitmentPostsLoading
-                && !viewModel.recruitmentPostsAccessDenied
-                && !viewModel.recruitmentPostsFeatureUnavailable {
-                await viewModel.loadRecruitmentPosts(reset: true)
-            }
-            if viewModel.recruitmentPostsHasMore {
-                await viewModel.ensureAllRecruitmentPostsLoaded()
+            await viewModel.loadRecruitmentPostsAndAllPages(reset: false)
+        }
+        .onChange(of: viewModel.recruitmentPostsHasMore) { hasMore in
+            if hasMore && !viewModel.recruitmentPostsLoading && !viewModel.recruitmentPostsLoadingMore {
+                Task { await viewModel.ensureAllRecruitmentPostsLoaded() }
             }
         }
         .sheet(
