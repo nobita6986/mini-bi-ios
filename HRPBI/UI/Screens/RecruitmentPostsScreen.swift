@@ -14,12 +14,17 @@ public struct RecruitmentPostsScreen: View {
         let isFiltering = viewModel.hasActiveRecruitmentPostFilter
         let kcnOptions = viewModel.availableRecruitmentIndustrialParkFilters
         let laborTypeOptions = viewModel.availableRecruitmentLaborTypeFilters
-        let selectedKcnName = kcnOptions.first(where: {
-            $0.industrialParkId == viewModel.selectedRecruitmentIndustrialParkId
-        })?.displayName
-        let selectedLaborTypeName = laborTypeOptions.first(where: {
+        let selectedKcnOption = kcnOptions.first(where: { opt in
+            guard let target = viewModel.selectedRecruitmentIndustrialParkId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !target.isEmpty else { return false }
+            return opt.industrialParkId.caseInsensitiveCompare(target) == .orderedSame
+                || opt.displayName.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(target) == .orderedSame
+        })
+        let selectedLaborOption = laborTypeOptions.first(where: {
             $0.laborTypeKey == viewModel.selectedRecruitmentLaborTypeKey
-        })?.displayName
+        })
+        let allKcnMenuLabel = allCards.isEmpty ? "Tất cả KCN" : "Tất cả KCN (\(allCards.count))"
+        let allLaborMenuLabel = allCards.isEmpty ? "Tất cả hình thức" : "Tất cả hình thức (\(allCards.count))"
 
         VStack(spacing: 0) {
             VStack(spacing: 8) {
@@ -48,7 +53,7 @@ public struct RecruitmentPostsScreen: View {
 
                     Spacer()
 
-                    if viewModel.recruitmentPostsLoadingMore && isFiltering {
+                    if viewModel.recruitmentPostsLoadingMore {
                         ProgressView()
                             .scaleEffect(0.75)
                             .tint(theme.primary)
@@ -58,16 +63,18 @@ public struct RecruitmentPostsScreen: View {
                 // Single-row Filter Bar: ONLY 2 filters (KCN & Hình thức)
                 HStack(spacing: 8) {
                     // 1. KCN Filter Menu Pill
-                    let isKcnActive = (selectedKcnName != nil)
+                    let isKcnActive = (selectedKcnOption != nil)
                     Menu {
                         Button {
                             HapticsManager.selection()
                             Task { await viewModel.selectRecruitmentIndustrialParkFilter(nil) }
                         } label: {
                             if viewModel.selectedRecruitmentIndustrialParkId == nil {
-                                Label("Tất cả KCN", systemImage: "checkmark")
+                                Label(allKcnMenuLabel, systemImage: "checkmark")
+                                    .monospacedDigit()
                             } else {
-                                Text("Tất cả KCN")
+                                Text(allKcnMenuLabel)
+                                    .monospacedDigit()
                             }
                         }
 
@@ -78,10 +85,12 @@ public struct RecruitmentPostsScreen: View {
                                     HapticsManager.selection()
                                     Task { await viewModel.selectRecruitmentIndustrialParkFilter(kcn.industrialParkId) }
                                 } label: {
-                                    if viewModel.selectedRecruitmentIndustrialParkId == kcn.industrialParkId {
-                                        Label(kcn.displayName, systemImage: "checkmark")
+                                    if selectedKcnOption?.industrialParkId == kcn.industrialParkId {
+                                        Label(kcn.formattedLabel, systemImage: "checkmark")
+                                            .monospacedDigit()
                                     } else {
-                                        Text(kcn.displayName)
+                                        Text(kcn.formattedLabel)
+                                            .monospacedDigit()
                                     }
                                 }
                             }
@@ -90,8 +99,9 @@ public struct RecruitmentPostsScreen: View {
                         HStack(spacing: 5) {
                             Image(systemName: "building.2")
                                 .font(.system(size: 11, weight: .semibold))
-                            Text(selectedKcnName ?? "KCN: Tất cả")
+                            Text(selectedKcnOption?.formattedLabel ?? "KCN: Tất cả")
                                 .font(.caption.weight(.semibold))
+                                .monospacedDigit()
                                 .lineLimit(1)
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 9, weight: .bold))
@@ -111,16 +121,18 @@ public struct RecruitmentPostsScreen: View {
                     .accessibilityIdentifier("recruitment_filter_kcn")
 
                     // 2. Hình thức (Labor Type) Filter Menu Pill
-                    let isLaborActive = (selectedLaborTypeName != nil)
+                    let isLaborActive = (selectedLaborOption != nil)
                     Menu {
                         Button {
                             HapticsManager.selection()
                             Task { await viewModel.selectRecruitmentLaborTypeFilter(nil) }
                         } label: {
                             if viewModel.selectedRecruitmentLaborTypeKey == nil {
-                                Label("Tất cả hình thức", systemImage: "checkmark")
+                                Label(allLaborMenuLabel, systemImage: "checkmark")
+                                    .monospacedDigit()
                             } else {
-                                Text("Tất cả hình thức")
+                                Text(allLaborMenuLabel)
+                                    .monospacedDigit()
                             }
                         }
 
@@ -132,9 +144,11 @@ public struct RecruitmentPostsScreen: View {
                                     Task { await viewModel.selectRecruitmentLaborTypeFilter(labor.laborTypeKey) }
                                 } label: {
                                     if viewModel.selectedRecruitmentLaborTypeKey == labor.laborTypeKey {
-                                        Label(labor.displayName, systemImage: "checkmark")
+                                        Label(labor.formattedLabel, systemImage: "checkmark")
+                                            .monospacedDigit()
                                     } else {
-                                        Text(labor.displayName)
+                                        Text(labor.formattedLabel)
+                                            .monospacedDigit()
                                     }
                                 }
                             }
@@ -143,8 +157,9 @@ public struct RecruitmentPostsScreen: View {
                         HStack(spacing: 5) {
                             Image(systemName: "briefcase")
                                 .font(.system(size: 11, weight: .semibold))
-                            Text(selectedLaborTypeName ?? "Hình thức: Tất cả")
+                            Text(selectedLaborOption?.formattedLabel ?? "Hình thức: Tất cả")
                                 .font(.caption.weight(.semibold))
+                                .monospacedDigit()
                                 .lineLimit(1)
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 9, weight: .bold))
@@ -217,7 +232,10 @@ public struct RecruitmentPostsScreen: View {
                     actionTitle: "Thử lại",
                     theme: theme,
                     onAction: {
-                        Task { await viewModel.loadRecruitmentPosts(reset: true) }
+                        Task {
+                            await viewModel.loadRecruitmentPosts(reset: true)
+                            await viewModel.ensureAllRecruitmentPostsLoaded()
+                        }
                     }
                 )
             } else if viewModel.recruitmentPostsLoading && allCards.isEmpty {
@@ -273,9 +291,7 @@ public struct RecruitmentPostsScreen: View {
                 .refreshable {
                     await viewModel.performRefreshable {
                         await viewModel.loadRecruitmentPosts(reset: true)
-                        if viewModel.hasActiveRecruitmentPostFilter {
-                            await viewModel.ensureAllRecruitmentPostsLoadedForFiltering()
-                        }
+                        await viewModel.ensureAllRecruitmentPostsLoaded()
                     }
                 }
             } else if allCards.isEmpty {
@@ -293,9 +309,7 @@ public struct RecruitmentPostsScreen: View {
                 .refreshable {
                     await viewModel.performRefreshable {
                         await viewModel.loadRecruitmentPosts(reset: true)
-                        if viewModel.hasActiveRecruitmentPostFilter {
-                            await viewModel.ensureAllRecruitmentPostsLoadedForFiltering()
-                        }
+                        await viewModel.ensureAllRecruitmentPostsLoaded()
                     }
                 }
             } else if filteredCards.isEmpty {
@@ -316,9 +330,7 @@ public struct RecruitmentPostsScreen: View {
                 .refreshable {
                     await viewModel.performRefreshable {
                         await viewModel.loadRecruitmentPosts(reset: true)
-                        if viewModel.hasActiveRecruitmentPostFilter {
-                            await viewModel.ensureAllRecruitmentPostsLoadedForFiltering()
-                        }
+                        await viewModel.ensureAllRecruitmentPostsLoaded()
                     }
                 }
             } else {
@@ -334,9 +346,10 @@ public struct RecruitmentPostsScreen: View {
                                     HapticsManager.lightImpact()
                                     Task {
                                         if viewModel.recruitmentPostsHasMore {
-                                            await viewModel.loadMoreRecruitmentPosts()
+                                            await viewModel.ensureAllRecruitmentPostsLoaded()
                                         } else {
                                             await viewModel.loadRecruitmentPosts(reset: true)
+                                            await viewModel.ensureAllRecruitmentPostsLoaded()
                                         }
                                     }
                                 }
@@ -378,9 +391,7 @@ public struct RecruitmentPostsScreen: View {
                 .refreshable {
                     await viewModel.performRefreshable {
                         await viewModel.loadRecruitmentPosts(reset: true)
-                        if viewModel.hasActiveRecruitmentPostFilter {
-                            await viewModel.ensureAllRecruitmentPostsLoadedForFiltering()
-                        }
+                        await viewModel.ensureAllRecruitmentPostsLoaded()
                     }
                 }
             }
@@ -392,6 +403,9 @@ public struct RecruitmentPostsScreen: View {
                 && !viewModel.recruitmentPostsAccessDenied
                 && !viewModel.recruitmentPostsFeatureUnavailable {
                 await viewModel.loadRecruitmentPosts(reset: true)
+            }
+            if viewModel.recruitmentPostsHasMore {
+                await viewModel.ensureAllRecruitmentPostsLoaded()
             }
         }
         .sheet(

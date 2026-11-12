@@ -267,11 +267,14 @@ public struct WorkReportsScreen: View {
             if viewModel.workReportHistoryFilterByDate {
                 HrpDateNavigatorBar(
                     selectedDateIso: viewModel.workReportHistorySelectedDate,
+                    todayDateIso: LeaveContract.todayVietnamIsoDate(),
+                    allowFutureDates: false,
                     theme: theme
                 ) { dateIso in
                     visibleHistoryCount = 15
                     viewModel.selectWorkReportHistoryDate(dateIso)
                 }
+                .accessibilityIdentifier("work_report_history_date_bar")
             }
 
             obligationsListSection(

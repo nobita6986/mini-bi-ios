@@ -17,17 +17,24 @@ public struct RecruitmentPostIndustrialParkSummary: Identifiable, Equatable, Sen
     public let industrialParkCode: String
     public let displayName: String
     public let active: Bool
+    public var jobCount: Int
+
+    public var formattedLabel: String {
+        "\(displayName) (\(jobCount))"
+    }
 
     public init(
         industrialParkId: String,
         industrialParkCode: String,
         displayName: String,
-        active: Bool
+        active: Bool,
+        jobCount: Int = 0
     ) {
         self.industrialParkId = industrialParkId
         self.industrialParkCode = industrialParkCode
         self.displayName = displayName
         self.active = active
+        self.jobCount = jobCount
     }
 }
 
@@ -47,10 +54,16 @@ public struct RecruitmentPostLaborTypeSummary: Identifiable, Equatable, Sendable
     public var id: String { laborTypeKey }
     public let laborTypeKey: String
     public let displayName: String
+    public var jobCount: Int
 
-    public init(laborTypeKey: String, displayName: String) {
+    public var formattedLabel: String {
+        "\(displayName) (\(jobCount))"
+    }
+
+    public init(laborTypeKey: String, displayName: String, jobCount: Int = 0) {
         self.laborTypeKey = laborTypeKey
         self.displayName = displayName
+        self.jobCount = jobCount
     }
 }
 
@@ -158,6 +171,23 @@ public struct RecruitmentPostListResult: Equatable, Sendable {
     public let hasMore: Bool
     public let nextCursor: String?
     public let snapshotToken: String
+    public let industrialParks: [RecruitmentPostIndustrialParkSummary]
+
+    public init(
+        items: [RecruitmentPostItem],
+        pageSize: Int,
+        hasMore: Bool,
+        nextCursor: String?,
+        snapshotToken: String,
+        industrialParks: [RecruitmentPostIndustrialParkSummary] = []
+    ) {
+        self.items = items
+        self.pageSize = pageSize
+        self.hasMore = hasMore
+        self.nextCursor = nextCursor
+        self.snapshotToken = snapshotToken
+        self.industrialParks = industrialParks
+    }
 }
 
 public struct RecruitmentPostCardViewModel: Equatable, Identifiable, Sendable {
@@ -460,6 +490,10 @@ public enum RecruitmentPostContract {
         "has_more",
         "next_cursor",
         "snapshot_token"
+    ]
+
+    private static let listOptionalKeys: Set<String> = [
+        "industrial_parks"
     ]
 
     private static let detailDataKeys: Set<String> = ["post"]
@@ -811,7 +845,11 @@ public enum RecruitmentPostContract {
     }
 
     public static func parseListData(_ data: [String: Any]) throws -> RecruitmentPostListResult {
-        try requireExactKeys(data, listDataKeys, label: "list data")
+        let actualKeys = Set(data.keys)
+        let allowedKeys = listDataKeys.union(listOptionalKeys)
+        if !listDataKeys.isSubset(of: actualKeys) || !actualKeys.isSubset(of: allowedKeys) {
+            throw RecruitmentPostContractError.invalidContract("Cấu trúc list data không khớp contract.")
+        }
         guard let rawItems = data["items"] as? [Any] else {
             throw RecruitmentPostContractError.invalidContract("Trường items phải là mảng.")
         }
@@ -843,12 +881,58 @@ public enum RecruitmentPostContract {
             items.append(parsed)
         }
 
+        var optionalIndustrialParks: [RecruitmentPostIndustrialParkSummary] = []
+        if let rawParks = data["industrial_parks"] as? [Any] {
+            for elem in rawParks {
+                if let nameStr = elem as? String {
+                    let cleanName = nameStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !cleanName.isEmpty else { continue }
+                    optionalIndustrialParks.append(
+                        RecruitmentPostIndustrialParkSummary(
+                            industrialParkId: cleanName,
+                            industrialParkCode: cleanName,
+                            displayName: cleanName,
+                            active: true
+                        )
+                    )
+                } else if let obj = elem as? [String: Any] {
+                    let displayName = (
+                        (obj["display_name"] as? String)
+                        ?? (obj["industrial_park_name"] as? String)
+                        ?? (obj["name"] as? String)
+                        ?? ""
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !displayName.isEmpty else { continue }
+                    let parkId = (
+                        (obj["industrial_park_id"] as? String)
+                        ?? (obj["id"] as? String)
+                        ?? displayName
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let parkCode = (
+                        (obj["industrial_park_code"] as? String)
+                        ?? (obj["code"] as? String)
+                        ?? displayName
+                    ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let active = (obj["active"] as? Bool) ?? true
+                    optionalIndustrialParks.append(
+                        RecruitmentPostIndustrialParkSummary(
+                            industrialParkId: parkId.isEmpty ? displayName : parkId,
+                            industrialParkCode: parkCode.isEmpty ? displayName : parkCode,
+                            displayName: displayName,
+                            active: active
+                        )
+                    )
+                }
+            }
+        }
+
         return RecruitmentPostListResult(
             items: items,
             pageSize: pageSize,
             hasMore: hasMore,
             nextCursor: nextCursor,
-            snapshotToken: snapshotToken
+            snapshotToken: snapshotToken,
+            industrialParks: optionalIndustrialParks
         )
     }
 

@@ -414,6 +414,7 @@ public struct HrpDateNavigatorBar: View {
     @Namespace private var dateStripNamespace
     @State private var showCalendarSheet: Bool = false
     @State private var pickerDate: Date = Date()
+    @State private var customWindowEndIso: String? = nil
 
     public init(
         selectedDateIso: String,
@@ -429,7 +430,7 @@ public struct HrpDateNavigatorBar: View {
         self.onDateSelected = onDateSelected
     }
 
-    private static var vietnamCalendar: Calendar {
+    public static var vietnamCalendar: Calendar {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "Asia/Ho_Chi_Minh") ?? .current
         cal.locale = Locale(identifier: "vi_VN")
@@ -446,16 +447,54 @@ public struct HrpDateNavigatorBar: View {
         return f
     }()
 
+    public static func resolveTodayIso(_ rawTodayIso: String) -> String {
+        let clean = rawTodayIso.trimmingCharacters(in: .whitespacesAndNewlines)
+        return LeaveContract.isValidIsoDate(clean) ? clean : LeaveContract.todayVietnamIsoDate()
+    }
+
+    private static func parseIsoStatic(_ iso: String) -> Date {
+        isoFormatter.date(from: iso.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Date()
+    }
+
+    private static func formatIsoStatic(_ date: Date) -> String {
+        isoFormatter.string(from: date)
+    }
+
+    public static func weekdayShortLabel(for date: Date, calendar: Calendar = vietnamCalendar) -> String {
+        switch calendar.component(.weekday, from: date) {
+        case 2: return "T2"
+        case 3: return "T3"
+        case 4: return "T4"
+        case 5: return "T5"
+        case 6: return "T6"
+        case 7: return "T7"
+        default: return "CN"
+        }
+    }
+
     private func parseIso(_ iso: String) -> Date {
-        Self.isoFormatter.date(from: iso.trimmingCharacters(in: .whitespacesAndNewlines)) ?? Date()
+        Self.parseIsoStatic(iso)
     }
 
     private func formatIso(_ date: Date) -> String {
-        Self.isoFormatter.string(from: date)
+        Self.formatIsoStatic(date)
+    }
+
+    public var resolvedTodayIso: String {
+        Self.resolveTodayIso(todayDateIso)
+    }
+
+    private var effectiveSelectedDateIso: String {
+        let clean = selectedDateIso.trimmingCharacters(in: .whitespacesAndNewlines)
+        let valid = LeaveContract.isValidIsoDate(clean) ? clean : resolvedTodayIso
+        if !allowFutureDates && valid > resolvedTodayIso {
+            return resolvedTodayIso
+        }
+        return valid
     }
 
     private var selectedDate: Date {
-        parseIso(selectedDateIso)
+        parseIso(effectiveSelectedDateIso)
     }
 
     private var monthYearLabel: String {
@@ -466,52 +505,154 @@ public struct HrpDateNavigatorBar: View {
         return "Tháng \(m), \(y)"
     }
 
-    private struct WeekDayCell: Identifiable {
-        let id: String // ISO date YYYY-MM-DD
-        let weekdayShort: String
-        let dayNumber: Int
-        let isToday: Bool
-        let isSelected: Bool
-        let isDisabled: Bool
+    public struct WeekDayCell: Identifiable, Equatable, Sendable {
+        public let id: String // ISO date YYYY-MM-DD
+        public let weekdayShort: String
+        public let dayNumber: Int
+        public let isToday: Bool
+        public let isSelected: Bool
+        public let isDisabled: Bool
+
+        public init(
+            id: String,
+            weekdayShort: String,
+            dayNumber: Int,
+            isToday: Bool,
+            isSelected: Bool,
+            isDisabled: Bool
+        ) {
+            self.id = id
+            self.weekdayShort = weekdayShort
+            self.dayNumber = dayNumber
+            self.isToday = isToday
+            self.isSelected = isSelected
+            self.isDisabled = isDisabled
+        }
     }
 
-    private var weekDays: [WeekDayCell] {
-        let cal = Self.vietnamCalendar
-        let baseDate = selectedDate
-        let weekday = cal.component(.weekday, from: baseDate) // 1 = Sun, 2 = Mon, ..., 7 = Sat
-        let offsetToMonday = (weekday == 1) ? -6 : (2 - weekday)
-        let monday = cal.date(byAdding: .day, value: offsetToMonday, to: baseDate) ?? baseDate
-        let labels = ["T2", "T3", "T4", "T5", "T6", "T7", "CN"]
+    public static func resolveWindowEndDateIso(
+        selectedDateIso: String,
+        todayDateIso: String = LeaveContract.todayVietnamIsoDate(),
+        allowFutureDates: Bool = false,
+        currentWindowEndIso: String? = nil
+    ) -> String {
+        let cal = vietnamCalendar
+        let todayIso = resolveTodayIso(todayDateIso)
+        let todayDate = parseIsoStatic(todayIso)
+        let cleanSel = selectedDateIso.trimmingCharacters(in: .whitespacesAndNewlines)
+        let validSelIso = LeaveContract.isValidIsoDate(cleanSel) ? cleanSel : todayIso
+
+        if allowFutureDates {
+            let selDate = parseIsoStatic(validSelIso)
+            let weekday = cal.component(.weekday, from: selDate)
+            let offsetToMonday = (weekday == 1) ? -6 : (2 - weekday)
+            let monday = cal.date(byAdding: .day, value: offsetToMonday, to: selDate) ?? selDate
+            let sunday = cal.date(byAdding: .day, value: 6, to: monday) ?? selDate
+            return formatIsoStatic(sunday)
+        }
+
+        let clampedSelIso = min(validSelIso, todayIso)
+        let selDate = parseIsoStatic(clampedSelIso)
+
+        if let rawCurEnd = currentWindowEndIso?.trimmingCharacters(in: .whitespacesAndNewlines),
+           LeaveContract.isValidIsoDate(rawCurEnd) {
+            let clampedCurEndIso = min(rawCurEnd, todayIso)
+            let curEndDate = parseIsoStatic(clampedCurEndIso)
+            let curStartDate = cal.date(byAdding: .day, value: -6, to: curEndDate) ?? curEndDate
+            let curStartIso = formatIsoStatic(curStartDate)
+            if clampedSelIso >= curStartIso && clampedSelIso <= clampedCurEndIso {
+                return clampedCurEndIso
+            }
+        }
+
+        let todayWindowStartDate = cal.date(byAdding: .day, value: -6, to: todayDate) ?? todayDate
+        let todayWindowStartIso = formatIsoStatic(todayWindowStartDate)
+        if clampedSelIso >= todayWindowStartIso {
+            return todayIso
+        }
+
+        let centeredEnd = cal.date(byAdding: .day, value: 3, to: selDate) ?? selDate
+        let centeredEndIso = formatIsoStatic(centeredEnd)
+        return min(todayIso, centeredEndIso)
+    }
+
+    public static func computeWeekDays(
+        selectedDateIso: String,
+        todayDateIso: String = LeaveContract.todayVietnamIsoDate(),
+        allowFutureDates: Bool = false,
+        currentWindowEndIso: String? = nil
+    ) -> [WeekDayCell] {
+        let cal = vietnamCalendar
+        let todayIso = resolveTodayIso(todayDateIso)
+        let cleanSel = selectedDateIso.trimmingCharacters(in: .whitespacesAndNewlines)
+        let validSelIso = LeaveContract.isValidIsoDate(cleanSel) ? cleanSel : todayIso
+        let effectiveSelIso = (!allowFutureDates && validSelIso > todayIso) ? todayIso : validSelIso
+
+        let windowEndIso = resolveWindowEndDateIso(
+            selectedDateIso: effectiveSelIso,
+            todayDateIso: todayIso,
+            allowFutureDates: allowFutureDates,
+            currentWindowEndIso: currentWindowEndIso
+        )
+        let windowEndDate = parseIsoStatic(windowEndIso)
+        let windowStartDate = cal.date(byAdding: .day, value: -6, to: windowEndDate) ?? windowEndDate
 
         return (0..<7).map { idx in
-            let d = cal.date(byAdding: .day, value: idx, to: monday) ?? baseDate
-            let iso = formatIso(d)
+            let d = cal.date(byAdding: .day, value: idx, to: windowStartDate) ?? windowEndDate
+            let iso = formatIsoStatic(d)
             let dayNum = cal.component(.day, from: d)
-            let disabled = !allowFutureDates && iso > todayDateIso
+            let weekdayLabel = weekdayShortLabel(for: d, calendar: cal)
+            let disabled = !allowFutureDates && iso > todayIso
             return WeekDayCell(
                 id: iso,
-                weekdayShort: labels[idx],
+                weekdayShort: weekdayLabel,
                 dayNumber: dayNum,
-                isToday: iso == todayDateIso,
-                isSelected: iso == selectedDateIso,
+                isToday: iso == todayIso,
+                isSelected: iso == effectiveSelIso,
                 isDisabled: disabled
             )
         }
     }
 
-    private var canAdvanceWeek: Bool {
+    private var weekDays: [WeekDayCell] {
+        Self.computeWeekDays(
+            selectedDateIso: selectedDateIso,
+            todayDateIso: resolvedTodayIso,
+            allowFutureDates: allowFutureDates,
+            currentWindowEndIso: customWindowEndIso
+        )
+    }
+
+    private var currentWindowEndIso: String {
+        Self.resolveWindowEndDateIso(
+            selectedDateIso: selectedDateIso,
+            todayDateIso: resolvedTodayIso,
+            allowFutureDates: allowFutureDates,
+            currentWindowEndIso: customWindowEndIso
+        )
+    }
+
+    public var canAdvanceWeek: Bool {
         if allowFutureDates { return true }
-        return selectedDateIso < todayDateIso
+        return currentWindowEndIso < resolvedTodayIso
     }
 
     private func shiftDays(_ delta: Int) {
         let cal = Self.vietnamCalendar
+        let todayIso = resolvedTodayIso
+        if !allowFutureDates {
+            let winEndDate = parseIso(currentWindowEndIso)
+            if let shiftedWinEnd = cal.date(byAdding: .day, value: delta, to: winEndDate) {
+                let rawWinEndIso = formatIso(shiftedWinEnd)
+                customWindowEndIso = min(todayIso, rawWinEndIso)
+            }
+        }
         guard let shifted = cal.date(byAdding: .day, value: delta, to: selectedDate) else { return }
         var targetIso = formatIso(shifted)
-        if !allowFutureDates && targetIso > todayDateIso {
-            targetIso = todayDateIso
+        if !allowFutureDates && targetIso > todayIso {
+            targetIso = todayIso
         }
-        guard targetIso != selectedDateIso else { return }
+        guard targetIso != effectiveSelectedDateIso else { return }
         HapticsManager.selection()
         onDateSelected(targetIso)
     }
@@ -559,10 +700,11 @@ public struct HrpDateNavigatorBar: View {
 
                 Spacer(minLength: 4)
 
-                if selectedDateIso != todayDateIso {
+                if effectiveSelectedDateIso != resolvedTodayIso {
                     Button {
                         HapticsManager.selection()
-                        onDateSelected(todayDateIso)
+                        customWindowEndIso = resolvedTodayIso
+                        onDateSelected(resolvedTodayIso)
                     } label: {
                         Text("Hôm nay")
                             .font(.caption.weight(.bold))
@@ -660,7 +802,7 @@ public struct HrpDateNavigatorBar: View {
                         DatePicker(
                             "Chọn ngày",
                             selection: $pickerDate,
-                            in: ...parseIso(todayDateIso),
+                            in: ...parseIso(resolvedTodayIso),
                             displayedComponents: [.date]
                         )
                         .datePickerStyle(.graphical)
@@ -674,7 +816,8 @@ public struct HrpDateNavigatorBar: View {
                         Button {
                             HapticsManager.selection()
                             showCalendarSheet = false
-                            onDateSelected(todayDateIso)
+                            customWindowEndIso = resolvedTodayIso
+                            onDateSelected(resolvedTodayIso)
                         } label: {
                             Text("Về hôm nay")
                                 .font(.subheadline.weight(.semibold))
@@ -688,9 +831,10 @@ public struct HrpDateNavigatorBar: View {
                         Button {
                             HapticsManager.selection()
                             let chosenIso = formatIso(pickerDate)
-                            let clampedIso = (!allowFutureDates && chosenIso > todayDateIso) ? todayDateIso : chosenIso
+                            let clampedIso = (!allowFutureDates && chosenIso > resolvedTodayIso) ? resolvedTodayIso : chosenIso
                             showCalendarSheet = false
-                            if clampedIso != selectedDateIso {
+                            customWindowEndIso = nil
+                            if clampedIso != effectiveSelectedDateIso {
                                 onDateSelected(clampedIso)
                             }
                         } label: {

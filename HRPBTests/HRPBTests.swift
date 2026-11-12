@@ -5111,4 +5111,190 @@ final class HRPBTests: XCTestCase {
         XCTAssertNil(vm.selectedRecruitmentLaborTypeKey)
         XCTAssertTrue(vm.recruitmentPosts.isEmpty)
     }
+
+    @MainActor
+    func testRound8_RecruitmentAutoLoadAllPagesAndKcnJobCountsAndDateNavigatorNoFutureDates() async throws {
+        // 1. Verify HrpDateNavigatorBar never shows future dates when allowFutureDates == false
+        let calendar = HrpDateNavigatorBar.vietnamCalendar
+        // 2026-11-12 is Thursday (T5)
+        let days = HrpDateNavigatorBar.computeWeekDays(
+            selectedDateIso: "2026-11-12",
+            todayDateIso: "2026-11-12",
+            displayedWeekMondayIso: nil,
+            allowFutureDates: false,
+            calendar: calendar
+        )
+        XCTAssertEqual(days.count, 7)
+        XCTAssertEqual(
+            days.map(\.id),
+            ["2026-11-06", "2026-11-07", "2026-11-08", "2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12"]
+        )
+        XCTAssertEqual(
+            days.map(\.weekdayShort),
+            ["T6", "T7", "CN", "T2", "T3", "T4", "T5"]
+        )
+        XCTAssertTrue(days.allSatisfy { !$0.isFuture && $0.id <= "2026-11-12" })
+        XCTAssertTrue(days.last?.isSelected == true)
+        XCTAssertTrue(days.last?.isToday == true)
+
+        // Clamping window end when displayedWindowEndIso > todayDateIso
+        let clampedWindowEnd = HrpDateNavigatorBar.resolveWindowEndDateIso(
+            selectedDateIso: "2026-11-10",
+            todayDateIso: "2026-11-12",
+            displayedWindowEndIso: "2026-11-20",
+            calendar: calendar
+        )
+        XCTAssertEqual(clampedWindowEnd, "2026-11-12")
+
+        // When allowFutureDates == true (e.g. leave creation if ever enabled), fixed Mon-Sun week is preserved
+        let futureAllowedDays = HrpDateNavigatorBar.computeWeekDays(
+            selectedDateIso: "2026-11-12",
+            todayDateIso: "2026-11-12",
+            displayedWeekMondayIso: nil,
+            allowFutureDates: true,
+            calendar: calendar
+        )
+        XCTAssertEqual(
+            futureAllowedDays.map(\.id),
+            ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15"]
+        )
+
+        // 2. Verify Recruitment auto-load all pages & KCN/LaborType job counts ("KCN Khai Quang (5)")
+        let ipKhaiQuang = "11111111-2222-4333-8444-555555555511"
+        let ipBaThien = "11111111-2222-4333-8444-555555555522"
+        let snap1 = "dddd0001-2222-4333-8444-555555555501"
+        let cursor1 = "eeee0001-2222-4333-8444-555555555501"
+
+        func makeItemJson(idx: Int, ipId: String, ipName: String, laborKey: String, laborLabel: String) -> String {
+            let briefId = String(format: "aaaa00%02d-2222-4333-8444-555555555500", idx)
+            return """
+            {
+              "brief_id": "\(briefId)",
+              "client": { "client_id": "22222222-2222-4333-8444-555555555501", "display_name": "Compal \(idx)", "short_code": "CP\(idx)" },
+              "industrial_park": { "industrial_park_id": "\(ipId)", "display_name": "\(ipName)" },
+              "labor_type": { "key": "\(laborKey)", "display_name": "\(laborLabel)" },
+              "gender_requirement": "Nam & Nữ",
+              "age_range": { "min_age": 18, "max_age": 38, "display_text": "18 - 38 tuổi" },
+              "headcount_needed": 50,
+              "recruitment_status": "OPEN",
+              "published_at": "2026-04-19T08:00:00Z",
+              "updated_at": "2026-04-19T08:30:00Z",
+              "summary_preview": {
+                "income_highlight": "9 - 12 triệu",
+                "shift_highlight": "2 ca",
+                "key_allowance_preview": "Phụ cấp chuyên cần",
+                "interview_schedule_preview": "Phỏng vấn hàng ngày"
+              }
+            }
+            """
+        }
+
+        let page1Items = [
+            makeItemJson(idx: 1, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 2, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 3, ipId: ipBaThien, ipName: "KCN Bá Thiện 1", laborKey: "THOI_VU", laborLabel: "Thời vụ")
+        ].joined(separator: ",")
+
+        let page2Items = [
+            makeItemJson(idx: 4, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 5, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "THOI_VU", laborLabel: "Thời vụ"),
+            makeItemJson(idx: 6, ipId: ipKhaiQuang, ipName: "KCN Khai Quang", laborKey: "CHINH_THUC", laborLabel: "Chính thức"),
+            makeItemJson(idx: 7, ipId: ipBaThien, ipName: "KCN Bá Thiện 1", laborKey: "THOI_VU", laborLabel: "Thời vụ")
+        ].joined(separator: ",")
+
+        MockURLProtocol.requestHandler = { request in
+            let url = request.url!
+            let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let cursor = comps?.queryItems?.first(where: { $0.name == "cursor" })?.value
+            let body: String
+            if url.path.hasSuffix("/api/mobile/v1/recruitment-posts") {
+                if cursor == nil {
+                    body = """
+                    {
+                      "ok": true,
+                      "data": {
+                        "items": [\(page1Items)],
+                        "industrial_parks": [
+                          { "industrial_park_id": "\(ipKhaiQuang)", "display_name": "KCN Khai Quang" },
+                          { "industrial_park_id": "\(ipBaThien)", "display_name": "KCN Bá Thiện 1" },
+                          "KCN Thăng Long 3"
+                        ],
+                        "next_cursor": "\(cursor1)",
+                        "has_more": true,
+                        "snapshot_token": "\(snap1)"
+                      },
+                      "meta": { "request_id": "req-r8-p1", "server_time": "2026-04-19T09:00:00Z" }
+                    }
+                    """
+                } else {
+                    body = """
+                    {
+                      "ok": true,
+                      "data": {
+                        "items": [\(page2Items)],
+                        "next_cursor": null,
+                        "has_more": false,
+                        "snapshot_token": "\(snap1)"
+                      },
+                      "meta": { "request_id": "req-r8-p2", "server_time": "2026-04-19T09:00:01Z" }
+                    }
+                    """
+                }
+            } else {
+                body = #"{"ok":true}"#
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(body.utf8))
+        }
+
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.r8rec.\(UUID().uuidString)"))
+        let vm = MiniBiViewModel(
+            repository: repo,
+            directEntryService: DirectEntryService(httpClient: client),
+            workReportsService: WorkReportsAndReportingService(httpClient: client),
+            salaryAdvanceService: SalaryAdvanceService(httpClient: client),
+            recruitmentPostService: RecruitmentPostService(httpClient: client)
+        )
+        vm.currentUser = MiniBiUser(
+            id: "aaaa0024-2222-4333-8444-555555555599",
+            username: "sampt.td",
+            fullName: "Phạm Thái Sâm",
+            permissions: ["entry_read"],
+            allowedWorkerTabs: ["recruited"]
+        )
+        vm.isAuthenticated = true
+
+        // Initial page 1 load preserves single-page fetch contract when no filter is active
+        await vm.loadRecruitmentPosts(reset: true)
+        XCTAssertEqual(vm.recruitmentPosts.count, 3)
+        XCTAssertTrue(vm.recruitmentPostsHasMore)
+
+        // Screen auto-loads remaining pages in background via ensureAllRecruitmentPostsLoaded()
+        await vm.ensureAllRecruitmentPostsLoaded()
+        XCTAssertEqual(vm.recruitmentPosts.count, 7)
+        XCTAssertFalse(vm.recruitmentPostsHasMore)
+
+        let kcnFilters = vm.availableRecruitmentIndustrialParkFilters
+        XCTAssertEqual(
+            kcnFilters.map(\.formattedLabel),
+            ["KCN Bá Thiện 1 (2)", "KCN Khai Quang (5)", "KCN Thăng Long 3 (0)"]
+        )
+
+        let laborFilters = vm.availableRecruitmentLaborTypeFilters
+        XCTAssertEqual(
+            laborFilters.map(\.formattedLabel),
+            ["Chính thức (4)", "Thời vụ (3)"]
+        )
+
+        // Selecting KCN Khai Quang filters down to 5 jobs
+        await vm.selectRecruitmentIndustrialParkFilter(ipKhaiQuang)
+        XCTAssertEqual(vm.filteredRecruitmentPosts.count, 5)
+
+        // Work report history date clamps future date to todayVietnamIsoDate
+        let todayIso = LeaveContract.todayVietnamIsoDate()
+        vm.workReportSelectedDateIso = "2099-12-31"
+        vm.selectWorkReportHistoryDate("2099-12-31")
+        XCTAssertEqual(vm.workReportSelectedDateIso, todayIso)
+    }
 }
