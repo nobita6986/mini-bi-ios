@@ -77,13 +77,11 @@ public struct MainContainerView: View {
                                     .foregroundColor(.white)
                             }
                             if let user = viewModel.currentUser {
-                                let activeTitle = (viewModel.currentDestination == .workers && viewModel.salaryAdvanceSheetOpen)
-                                    ? "Ứng lương"
-                                    : viewModel.currentDestination.screenTitleVi
-                                Text("\(activeTitle) · \(user.fullName)")
-                                    .font(.caption)
-                                    .foregroundColor(SemanticColors.textMuted)
+                                Text(user.fullName)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundColor(SemanticColors.textSecondary)
                                     .lineLimit(1)
+                                    .accessibilityIdentifier("topbar_user_fullname")
                             }
                         }
                     }

@@ -230,6 +230,7 @@ public final class MiniBiRepository {
     public let keychain: KeychainStore
 
     private static let keySavedLoginAccounts = "saved_login_accounts_v1"
+    private static let keyResolvedUserFullNames = "resolved_user_full_names_v1"
     private static let keySelectedThemeId = "selected_theme_id_v1"
     private static let keySelectedEnvVariant = "selected_env_variant_v1"
     private static let maxSavedAccounts = 5
@@ -240,6 +241,78 @@ public final class MiniBiRepository {
     ) {
         self.httpClient = httpClient
         self.keychain = keychain
+    }
+
+    // MARK: - Resolved User Full Name Cache in Keychain
+
+    private func loadResolvedFullNameMap() -> [String: String] {
+        guard let data = keychain.getData(forKey: Self.keyResolvedUserFullNames),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    public func getCachedResolvedFullName(forUserId userId: String, username: String = "") -> String? {
+        let map = loadResolvedFullNameMap()
+        let cleanId = userId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !cleanId.isEmpty, let cached = map[cleanId],
+           !MiniBiUser.looksLikeLoginHandle(cached, username: username) {
+            return cached
+        }
+        if !cleanUsername.isEmpty, let cached = map[cleanUsername],
+           !MiniBiUser.looksLikeLoginHandle(cached, username: username) {
+            return cached
+        }
+        return nil
+    }
+
+    public func saveResolvedFullName(_ fullName: String, forUserId userId: String, username: String = "") {
+        let cleanName = fullName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty,
+              !MiniBiUser.looksLikeLoginHandle(cleanName, username: username) else {
+            return
+        }
+
+        let cleanId = userId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var map = loadResolvedFullNameMap()
+        var didChangeMap = false
+        if !cleanId.isEmpty && map[cleanId] != cleanName {
+            map[cleanId] = cleanName
+            didChangeMap = true
+        }
+        if !cleanUsername.isEmpty && map[cleanUsername] != cleanName {
+            map[cleanUsername] = cleanName
+            didChangeMap = true
+        }
+        if didChangeMap, let data = try? JSONEncoder().encode(map) {
+            keychain.setData(data, forKey: Self.keyResolvedUserFullNames)
+        }
+
+        // Also update SavedLoginAccount displayName if matching identifier exists
+        guard !cleanId.isEmpty || !cleanUsername.isEmpty else { return }
+        var accounts = getSavedLoginAccounts()
+        var didChangeAccount = false
+        for idx in accounts.indices {
+            let accId = accounts[idx].identifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if (!cleanUsername.isEmpty && accId == cleanUsername) || (!cleanId.isEmpty && accId == cleanId) {
+                if accounts[idx].displayName != cleanName {
+                    accounts[idx] = SavedLoginAccount(
+                        identifier: accounts[idx].identifier,
+                        password: accounts[idx].password,
+                        displayName: cleanName,
+                        role: accounts[idx].role,
+                        updatedAtEpochMs: accounts[idx].updatedAtEpochMs
+                    )
+                    didChangeAccount = true
+                }
+            }
+        }
+        if didChangeAccount, let data = try? JSONEncoder().encode(accounts) {
+            keychain.setData(data, forKey: Self.keySavedLoginAccounts)
+        }
     }
 
     // MARK: - Saved Login Accounts in iOS Keychain
@@ -338,7 +411,8 @@ public final class MiniBiRepository {
         let user = Self.parseUser(userObj, fallbackRoot: root, fallbackIdentifier: trimmedId)
         if !user.username.isEmpty || !user.fullName.isEmpty || !user.id.isEmpty {
             let syncedUser = await syncDirectEntrySession(for: user)
-            return .success(syncedUser, statusCode: response.statusCode)
+            let resolvedUser = await resolveRealFullNameIfHandle(for: syncedUser)
+            return .success(resolvedUser, statusCode: response.statusCode)
         }
 
         return await fetchCurrentUser()
@@ -360,7 +434,8 @@ public final class MiniBiRepository {
             ?? root
         let user = Self.parseUser(userObj, fallbackRoot: root)
         let syncedUser = await syncDirectEntrySession(for: user)
-        return .success(syncedUser, statusCode: response.statusCode)
+        let resolvedUser = await resolveRealFullNameIfHandle(for: syncedUser)
+        return .success(resolvedUser, statusCode: response.statusCode)
     }
 
     /// Fetches canonical Direct Entry session metadata (`GET /api/direct-entry/session`)
@@ -386,7 +461,152 @@ public final class MiniBiRepository {
         )
         var copy = user
         copy.allowedWorkerTabs = resolvedTabs
+        if let actorObj = root["actor"] as? [String: Any] {
+            let sessionUserId = actorObj.optString("app_user_id").trimmingCharacters(in: .whitespacesAndNewlines)
+            if sessionUserId.caseInsensitiveCompare(cleanUserId) == .orderedSame {
+                if let suggestion = actorObj.optNullableString("self_recruiter_suggestion"), !suggestion.isEmpty {
+                    copy.selfRecruiterSuggestion = suggestion
+                }
+                if MiniBiUser.looksLikeLoginHandle(copy.fullName, username: copy.username) {
+                    let candidate = actorObj.optString("full_name", "employee_display_name", "ho_ten", "employee_name", "display_name")
+                    if !candidate.isEmpty && !MiniBiUser.looksLikeLoginHandle(candidate, username: copy.username) {
+                        copy.fullName = candidate
+                    }
+                }
+            }
+        }
         return copy
+    }
+
+    /// Resolves real Vietnamese full name when `user.fullName` is a login handle (e.g. `sampt.td`).
+    /// Strictly gated by `MiniBiUser.looksLikeLoginHandle(user.fullName, username: user.username) == true`
+    /// so accounts that already have a real full name never trigger extra network requests.
+    public func resolveRealFullNameIfHandle(for user: MiniBiUser) async -> MiniBiUser {
+        if !MiniBiUser.looksLikeLoginHandle(user.fullName, username: user.username) {
+            saveResolvedFullName(user.fullName, forUserId: user.id, username: user.username)
+            return user
+        }
+
+        // 1. Check Keychain cache first
+        if let cached = getCachedResolvedFullName(forUserId: user.id, username: user.username) {
+            var resolved = user
+            resolved.fullName = cached
+            saveResolvedFullName(cached, forUserId: user.id, username: user.username)
+            return resolved
+        }
+
+        // 2a. GET /api/attendance/history?limit=1 -> data.items[0].employee_display_name (or items[0].employee_display_name)
+        let attResp = await httpClient.request(
+            method: "GET",
+            path: "/api/attendance/history",
+            queryItems: [URLQueryItem(name: "limit", value: "1")]
+        )
+        if attResp.isSuccess, let root = attResp.jsonObject {
+            let dataObj = (root["data"] as? [String: Any]) ?? root
+            let items = dataObj.optObjectArray("items", "records", "history")
+                .ifEmpty(root.optObjectArray("items", "records", "history"))
+            for item in items {
+                let candidate = item.optString("employee_display_name", "full_name", "ho_ten", "display_name")
+                if !candidate.isEmpty && !MiniBiUser.looksLikeLoginHandle(candidate, username: user.username) {
+                    var updated = user
+                    updated.fullName = candidate
+                    saveResolvedFullName(candidate, forUserId: user.id, username: user.username)
+                    return updated
+                }
+            }
+        }
+
+        // 2b. GET /api/work-reports/obligations -> assignee_display_name of item matching user.id (or first personal item)
+        let obResp = await httpClient.request(
+            method: "GET",
+            path: "/api/work-reports/obligations"
+        )
+        if obResp.isSuccess, let root = obResp.jsonObject {
+            let dataObj = (root["data"] as? [String: Any]) ?? root
+            let items = root.optObjectArray("data", "obligations", "items")
+                .ifEmpty(dataObj.optObjectArray("obligations", "items"))
+            let cleanUserId = user.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            var firstPersonalCandidate = ""
+            for item in items {
+                let obObj = (item["obligation"] as? [String: Any]) ?? item
+                let assigneeId = obObj.optString("assignee_user_id", "subject_user_id", "app_user_id", "user_id")
+                let assigneeName = obObj.optString("assignee_display_name", "subject_display_name", "assignee_name", "employee_display_name")
+                guard !assigneeName.isEmpty, !MiniBiUser.looksLikeLoginHandle(assigneeName, username: user.username) else {
+                    continue
+                }
+                if !cleanUserId.isEmpty && assigneeId.caseInsensitiveCompare(cleanUserId) == .orderedSame {
+                    var updated = user
+                    updated.fullName = assigneeName
+                    saveResolvedFullName(assigneeName, forUserId: user.id, username: user.username)
+                    return updated
+                }
+                if firstPersonalCandidate.isEmpty {
+                    firstPersonalCandidate = assigneeName
+                }
+            }
+            if !firstPersonalCandidate.isEmpty {
+                var updated = user
+                updated.fullName = firstPersonalCandidate
+                saveResolvedFullName(firstPersonalCandidate, forUserId: user.id, username: user.username)
+                return updated
+            }
+        }
+
+        // 2c. GET /api/leave/me -> data.account.display_name, or match recruiter_id / personnel_code / selfRecruiterSuggestion against GET /api/direct-entry/catalog
+        var candidateRecruiterKeys: [String] = []
+        if let suggestion = user.selfRecruiterSuggestion?.trimmingCharacters(in: .whitespacesAndNewlines), !suggestion.isEmpty {
+            candidateRecruiterKeys.append(suggestion)
+        }
+        let leaveResp = await httpClient.request(method: "GET", path: "/api/leave/me")
+        if leaveResp.isSuccess, let root = leaveResp.jsonObject {
+            let dataObj = (root["data"] as? [String: Any]) ?? root
+            let accountObj = (dataObj["account"] as? [String: Any])
+                ?? (root["account"] as? [String: Any])
+                ?? dataObj
+            let leaveDisplayName = accountObj.optString("display_name", "full_name", "employee_display_name", "ho_ten")
+            if !leaveDisplayName.isEmpty && !MiniBiUser.looksLikeLoginHandle(leaveDisplayName, username: user.username) {
+                var updated = user
+                updated.fullName = leaveDisplayName
+                saveResolvedFullName(leaveDisplayName, forUserId: user.id, username: user.username)
+                return updated
+            }
+            for key in [
+                accountObj.optString("recruiter_id"),
+                accountObj.optString("personnel_code"),
+                accountObj.optString("employee_code")
+            ] {
+                let clean = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !clean.isEmpty && !candidateRecruiterKeys.contains(where: { $0.caseInsensitiveCompare(clean) == .orderedSame }) {
+                    candidateRecruiterKeys.append(clean)
+                }
+            }
+        }
+
+        if !candidateRecruiterKeys.isEmpty {
+            let catResp = await httpClient.request(method: "GET", path: "/api/direct-entry/catalog")
+            if catResp.isSuccess, let root = catResp.jsonObject {
+                let catObj = (root["catalog"] as? [String: Any])
+                    ?? (root["data"] as? [String: Any])
+                    ?? root
+                let recruiters = catObj.optObjectArray("recruiters", "nguoi_tuyen_list")
+                for rec in recruiters {
+                    let recId = rec.optString("recruiter_id", "id", "code", "value")
+                    let recName = rec.optString("display_name", "display", "name", "label")
+                    guard !recId.isEmpty, !recName.isEmpty,
+                          !MiniBiUser.looksLikeLoginHandle(recName, username: user.username) else {
+                        continue
+                    }
+                    if candidateRecruiterKeys.contains(where: { $0.caseInsensitiveCompare(recId) == .orderedSame }) {
+                        var updated = user
+                        updated.fullName = recName
+                        saveResolvedFullName(recName, forUserId: user.id, username: user.username)
+                        return updated
+                    }
+                }
+            }
+        }
+
+        return user
     }
 
     public func logout() async {
@@ -658,7 +878,30 @@ public final class MiniBiRepository {
     ) -> MiniBiUser {
         let id = obj.optString("app_user_id", "id", "user_id", "username", defaultValue: fallbackIdentifier)
         let username = obj.optString("username", "login_id", "email", "app_user_id", "user_code", "code", defaultValue: fallbackIdentifier.isEmpty ? id : fallbackIdentifier)
-        let fullName = obj.optString("display_name", "full_name", "name", defaultValue: username)
+        let rawDisplayName = obj.optString("display_name", "full_name", "name", defaultValue: username)
+        let candidateRealNames: [String] = [
+            obj.optString("full_name"),
+            obj.optString("employee_display_name"),
+            obj.optString("ho_ten"),
+            obj.optString("employee_name"),
+            obj.optString("name"),
+            fallbackRoot?.optString("full_name", "employee_display_name", "ho_ten", "employee_name") ?? ""
+        ]
+        let fullName: String = {
+            if !MiniBiUser.looksLikeLoginHandle(rawDisplayName, username: username) {
+                return rawDisplayName
+            }
+            for candidate in candidateRealNames {
+                let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty && !MiniBiUser.looksLikeLoginHandle(trimmed, username: username) {
+                    return trimmed
+                }
+            }
+            return rawDisplayName
+        }()
+        let selfRecruiterSuggestion = obj.optNullableString("self_recruiter_suggestion")
+            ?? fallbackRoot?.optNullableString("self_recruiter_suggestion")
+            ?? (fallbackRoot?["actor"] as? [String: Any])?.optNullableString("self_recruiter_suggestion")
 
         var capabilities = obj.optStringArray("capabilities")
         if capabilities.isEmpty {
@@ -722,7 +965,8 @@ public final class MiniBiRepository {
             phone: phone,
             teamName: teamName,
             permissions: capabilities,
-            allowedWorkerTabs: allowedWorkerTabs
+            allowedWorkerTabs: allowedWorkerTabs,
+            selfRecruiterSuggestion: selfRecruiterSuggestion
         )
     }
 

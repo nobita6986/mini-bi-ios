@@ -426,6 +426,8 @@ public final class AttendanceOutboxService {
     private let monitorQueue = DispatchQueue(label: "com.aistudio.minibi.attendance.outbox.monitor")
 
     public var onOutboxChanged: (() -> Void)?
+    public var onResolvedEmployeeDisplayName: ((String) -> Void)?
+    public private(set) var lastResolvedEmployeeDisplayName: String? = nil
 
     public init(
         httpClient: BackendHttpClient = .shared,
@@ -743,6 +745,17 @@ public final class AttendanceOutboxService {
             // Keep local photo file on disk so the user immediately sees the check-in photo in the attendance list,
             // matching Android's `AttendanceOutboxService.kt` (`persistedFile`).
             upsertItem(item)
+
+            let resolvedEmpName = (
+                recordObj?.optString("employee_display_name", "full_name", "ho_ten")
+                ?? response.jsonObject?.optString("employee_display_name", "full_name", "ho_ten")
+                ?? ""
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !resolvedEmpName.isEmpty && !MiniBiUser.looksLikeLoginHandle(resolvedEmpName) {
+                lastResolvedEmployeeDisplayName = resolvedEmpName
+                onResolvedEmployeeDisplayName?(resolvedEmpName)
+            }
+
             return .success(item, statusCode: response.statusCode)
         } else {
             let isPermanent = isPermanentError(httpStatus: response.statusCode, errorCode: response.errorCode)
@@ -870,6 +883,20 @@ public final class AttendanceOutboxService {
         let todayServerCount = root.optInt("today_count", "today_check_in_count", defaultValue: -1)
         let normalizedKey = userKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
+        var resolvedEmpNameFromHistory = reportObj.optString("employee_display_name", "full_name", "ho_ten")
+        if resolvedEmpNameFromHistory.isEmpty || MiniBiUser.looksLikeLoginHandle(resolvedEmpNameFromHistory) {
+            resolvedEmpNameFromHistory = root.optString("employee_display_name", "full_name", "ho_ten")
+        }
+        if resolvedEmpNameFromHistory.isEmpty || MiniBiUser.looksLikeLoginHandle(resolvedEmpNameFromHistory) {
+            for obj in rawItems {
+                let candidate = obj.optString("employee_display_name", "full_name", "ho_ten")
+                if !candidate.isEmpty && !MiniBiUser.looksLikeLoginHandle(candidate) {
+                    resolvedEmpNameFromHistory = candidate
+                    break
+                }
+            }
+        }
+
         lock.lock()
         lastHistorySyncHasMore = resolvedHasMore
         lastHistorySyncTotalCount = totalRows >= 0 ? totalRows : rawItems.count
@@ -937,6 +964,10 @@ public final class AttendanceOutboxService {
         lock.unlock()
 
         onOutboxChanged?()
+        if !resolvedEmpNameFromHistory.isEmpty && !MiniBiUser.looksLikeLoginHandle(resolvedEmpNameFromHistory) {
+            lastResolvedEmployeeDisplayName = resolvedEmpNameFromHistory
+            onResolvedEmployeeDisplayName?(resolvedEmpNameFromHistory)
+        }
         let userItems = listItemsForUser(userKey: userKey)
         let computedTodayCount = todayServerCount >= 0
             ? todayServerCount

@@ -9,53 +9,189 @@ public struct RecruitmentPostsScreen: View {
 
     public var body: some View {
         let theme = viewModel.selectedTheme
-        let cards = viewModel.recruitmentPosts.map { RecruitmentPostContract.toCardViewModel($0) }
+        let allCards = viewModel.recruitmentPosts.map { RecruitmentPostContract.toCardViewModel($0) }
+        let filteredCards = viewModel.filteredRecruitmentPosts.map { RecruitmentPostContract.toCardViewModel($0) }
+        let isFiltering = viewModel.hasActiveRecruitmentPostFilter
+        let kcnOptions = viewModel.availableRecruitmentIndustrialParkFilters
+        let laborTypeOptions = viewModel.availableRecruitmentLaborTypeFilters
+        let selectedKcnName = kcnOptions.first(where: {
+            $0.industrialParkId == viewModel.selectedRecruitmentIndustrialParkId
+        })?.displayName
+        let selectedLaborTypeName = laborTypeOptions.first(where: {
+            $0.laborTypeKey == viewModel.selectedRecruitmentLaborTypeKey
+        })?.displayName
 
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "megaphone.fill")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(theme.primary)
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "megaphone.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(theme.primary)
 
-                Text("Tin tuyển dụng")
-                    .font(.subheadline.weight(.bold))
-                    .foregroundColor(SemanticColors.textPrimary)
+                    Text("Tin tuyển dụng")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundColor(SemanticColors.textPrimary)
 
-                if !cards.isEmpty {
-                    Text("\(cards.count)\(viewModel.recruitmentPostsHasMore ? "+" : "")")
-                        .font(.caption2.weight(.bold).monospacedDigit())
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(SemanticColors.infoBg)
-                        .foregroundColor(SemanticColors.infoText)
-                        .clipShape(Capsule())
-                }
-
-                Spacer()
-
-                Button {
-                    HapticsManager.lightImpact()
-                    Task { await viewModel.loadRecruitmentPosts(reset: true) }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 11, weight: .bold))
-                        Text("Làm mới")
-                            .font(.caption.weight(.semibold))
+                    if !allCards.isEmpty {
+                        let countBadgeText = isFiltering
+                            ? "\(filteredCards.count)/\(allCards.count)"
+                            : "\(allCards.count)\(viewModel.recruitmentPostsHasMore ? "+" : "")"
+                        Text(countBadgeText)
+                            .font(.caption2.weight(.bold).monospacedDigit())
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(isFiltering ? theme.primaryLight : SemanticColors.infoBg)
+                            .foregroundColor(isFiltering ? theme.primary : SemanticColors.infoText)
+                            .clipShape(Capsule())
+                            .accessibilityIdentifier("recruitment_posts_count_badge")
                     }
-                    .foregroundColor(theme.primary)
-                    .padding(.horizontal, 12)
-                    .frame(minHeight: 44)
-                    .background(theme.primaryLight)
-                    .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusXS, style: .continuous))
-                    .contentShape(Rectangle())
+
+                    Spacer()
+
+                    if viewModel.recruitmentPostsLoadingMore && isFiltering {
+                        ProgressView()
+                            .scaleEffect(0.75)
+                            .tint(theme.primary)
+                    }
                 }
-                .buttonStyle(HrpPressableButtonStyle())
-                .disabled(viewModel.recruitmentPostsLoading || viewModel.recruitmentPostsLoadingMore)
-                .accessibilityIdentifier("recruitment_posts_refresh_button")
+
+                // Single-row Filter Bar: ONLY 2 filters (KCN & Hình thức)
+                HStack(spacing: 8) {
+                    // 1. KCN Filter Menu Pill
+                    let isKcnActive = (selectedKcnName != nil)
+                    Menu {
+                        Button {
+                            HapticsManager.selection()
+                            Task { await viewModel.selectRecruitmentIndustrialParkFilter(nil) }
+                        } label: {
+                            if viewModel.selectedRecruitmentIndustrialParkId == nil {
+                                Label("Tất cả KCN", systemImage: "checkmark")
+                            } else {
+                                Text("Tất cả KCN")
+                            }
+                        }
+
+                        if !kcnOptions.isEmpty {
+                            Divider()
+                            ForEach(kcnOptions) { kcn in
+                                Button {
+                                    HapticsManager.selection()
+                                    Task { await viewModel.selectRecruitmentIndustrialParkFilter(kcn.industrialParkId) }
+                                } label: {
+                                    if viewModel.selectedRecruitmentIndustrialParkId == kcn.industrialParkId {
+                                        Label(kcn.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(kcn.displayName)
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "building.2")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text(selectedKcnName ?? "KCN: Tất cả")
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .foregroundColor(isKcnActive ? theme.primary : SemanticColors.textPrimary)
+                        .padding(.horizontal, 11)
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .background(isKcnActive ? theme.primaryLight : SemanticColors.surfaceMuted)
+                        .overlay(
+                            Capsule()
+                                .stroke(isKcnActive ? theme.primary.opacity(0.45) : SemanticColors.borderSubtle, lineWidth: 0.9)
+                        )
+                        .clipShape(Capsule())
+                        .contentShape(Rectangle())
+                    }
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("recruitment_filter_kcn")
+
+                    // 2. Hình thức (Labor Type) Filter Menu Pill
+                    let isLaborActive = (selectedLaborTypeName != nil)
+                    Menu {
+                        Button {
+                            HapticsManager.selection()
+                            Task { await viewModel.selectRecruitmentLaborTypeFilter(nil) }
+                        } label: {
+                            if viewModel.selectedRecruitmentLaborTypeKey == nil {
+                                Label("Tất cả hình thức", systemImage: "checkmark")
+                            } else {
+                                Text("Tất cả hình thức")
+                            }
+                        }
+
+                        if !laborTypeOptions.isEmpty {
+                            Divider()
+                            ForEach(laborTypeOptions) { labor in
+                                Button {
+                                    HapticsManager.selection()
+                                    Task { await viewModel.selectRecruitmentLaborTypeFilter(labor.laborTypeKey) }
+                                } label: {
+                                    if viewModel.selectedRecruitmentLaborTypeKey == labor.laborTypeKey {
+                                        Label(labor.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(labor.displayName)
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "briefcase")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text(selectedLaborTypeName ?? "Hình thức: Tất cả")
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .foregroundColor(isLaborActive ? theme.primary : SemanticColors.textPrimary)
+                        .padding(.horizontal, 11)
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .background(isLaborActive ? theme.primaryLight : SemanticColors.surfaceMuted)
+                        .overlay(
+                            Capsule()
+                                .stroke(isLaborActive ? theme.primary.opacity(0.45) : SemanticColors.borderSubtle, lineWidth: 0.9)
+                        )
+                        .clipShape(Capsule())
+                        .contentShape(Rectangle())
+                    }
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("recruitment_filter_labor_type")
+
+                    // Clear filter action when any filter is active (>= 44pt touch target)
+                    if isFiltering {
+                        Button {
+                            HapticsManager.selection()
+                            viewModel.clearRecruitmentPostFilters()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("Xóa lọc")
+                                    .font(.caption.weight(.semibold))
+                                    .lineLimit(1)
+                            }
+                            .foregroundColor(SemanticColors.dangerText)
+                            .padding(.horizontal, 10)
+                            .frame(minHeight: 36)
+                            .background(SemanticColors.dangerBg)
+                            .clipShape(Capsule())
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(HrpPressableButtonStyle())
+                        .accessibilityIdentifier("recruitment_filter_clear")
+                    }
+                }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 6)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
             .background(Color.white)
             .overlay(
                 Rectangle()
@@ -84,12 +220,12 @@ public struct RecruitmentPostsScreen: View {
                         Task { await viewModel.loadRecruitmentPosts(reset: true) }
                     }
                 )
-            } else if viewModel.recruitmentPostsLoading && cards.isEmpty {
+            } else if viewModel.recruitmentPostsLoading && allCards.isEmpty {
                 ScrollView {
                     VStack(spacing: 12) {
-                        ForEach(0..<2, id: \.self) { _ in
+                        ForEach(0..<2, id: \.self) { idx in
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Dự án Sản xuất Linh kiện Điện tử")
+                                Text("\(idx + 1). Dự án Sản xuất Linh kiện Điện tử")
                                     .font(.headline.weight(.bold))
                                 HStack(spacing: 8) {
                                     Text("LCB: 5.500.000 đ")
@@ -120,28 +256,71 @@ public struct RecruitmentPostsScreen: View {
                     .padding(14)
                     .redacted(reason: .placeholder)
                 }
-            } else if let error = viewModel.recruitmentPostsError, cards.isEmpty {
-                RecruitmentPostStateView(
-                    iconName: "wifi.exclamationmark",
-                    title: "Không thể tải danh sách",
-                    message: error,
-                    actionTitle: "Thử lại",
-                    theme: theme,
-                    onAction: {
-                        Task { await viewModel.loadRecruitmentPosts(reset: true) }
+            } else if let error = viewModel.recruitmentPostsError, allCards.isEmpty {
+                ScrollView {
+                    RecruitmentPostStateView(
+                        iconName: "wifi.exclamationmark",
+                        title: "Không thể tải danh sách",
+                        message: error,
+                        actionTitle: "Thử lại",
+                        theme: theme,
+                        onAction: {
+                            Task { await viewModel.loadRecruitmentPosts(reset: true) }
+                        }
+                    )
+                    .frame(minHeight: 360)
+                }
+                .refreshable {
+                    await viewModel.performRefreshable {
+                        await viewModel.loadRecruitmentPosts(reset: true)
+                        if viewModel.hasActiveRecruitmentPostFilter {
+                            await viewModel.ensureAllRecruitmentPostsLoadedForFiltering()
+                        }
                     }
-                )
-            } else if cards.isEmpty {
-                RecruitmentPostStateView(
-                    iconName: "megaphone",
-                    title: "Chưa có tin tuyển dụng",
-                    message: "Hiện chưa có tin tuyển dụng nào đang hiệu lực.",
-                    actionTitle: "Làm mới",
-                    theme: theme,
-                    onAction: {
-                        Task { await viewModel.loadRecruitmentPosts(reset: true) }
+                }
+            } else if allCards.isEmpty {
+                ScrollView {
+                    RecruitmentPostStateView(
+                        iconName: "megaphone",
+                        title: "Chưa có tin tuyển dụng",
+                        message: "Hiện chưa có tin tuyển dụng nào đang hiệu lực. Kéo xuống để làm mới.",
+                        actionTitle: nil,
+                        theme: theme,
+                        onAction: nil
+                    )
+                    .frame(minHeight: 360)
+                }
+                .refreshable {
+                    await viewModel.performRefreshable {
+                        await viewModel.loadRecruitmentPosts(reset: true)
+                        if viewModel.hasActiveRecruitmentPostFilter {
+                            await viewModel.ensureAllRecruitmentPostsLoadedForFiltering()
+                        }
                     }
-                )
+                }
+            } else if filteredCards.isEmpty {
+                ScrollView {
+                    RecruitmentPostStateView(
+                        iconName: "line.3.horizontal.decrease.circle",
+                        title: "Không có tin tuyển dụng phù hợp",
+                        message: "Không tìm thấy tin tuyển dụng nào khớp với bộ lọc đang chọn.",
+                        actionTitle: "Xóa bộ lọc",
+                        theme: theme,
+                        onAction: {
+                            HapticsManager.selection()
+                            viewModel.clearRecruitmentPostFilters()
+                        }
+                    )
+                    .frame(minHeight: 360)
+                }
+                .refreshable {
+                    await viewModel.performRefreshable {
+                        await viewModel.loadRecruitmentPosts(reset: true)
+                        if viewModel.hasActiveRecruitmentPostFilter {
+                            await viewModel.ensureAllRecruitmentPostsLoadedForFiltering()
+                        }
+                    }
+                }
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
@@ -169,8 +348,9 @@ public struct RecruitmentPostsScreen: View {
                             .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous))
                         }
 
-                        ForEach(cards) { card in
+                        ForEach(Array(filteredCards.enumerated()), id: \.element.id) { idx, card in
                             RecruitmentPostSummaryCardView(
+                                index: idx + 1,
                                 card: card,
                                 theme: theme,
                                 onOpenDetail: {
@@ -182,7 +362,7 @@ public struct RecruitmentPostsScreen: View {
 
                         if viewModel.recruitmentPostsHasMore {
                             HrpLoadMoreButton(
-                                loadedCount: cards.count,
+                                loadedCount: allCards.count,
                                 totalCount: nil,
                                 isLoading: viewModel.recruitmentPostsLoadingMore,
                                 theme: theme
@@ -198,6 +378,9 @@ public struct RecruitmentPostsScreen: View {
                 .refreshable {
                     await viewModel.performRefreshable {
                         await viewModel.loadRecruitmentPosts(reset: true)
+                        if viewModel.hasActiveRecruitmentPostFilter {
+                            await viewModel.ensureAllRecruitmentPostsLoadedForFiltering()
+                        }
                     }
                 }
             }
@@ -271,6 +454,7 @@ private struct RecruitmentPostStateView: View {
 }
 
 private struct RecruitmentPostSummaryCardView: View {
+    let index: Int
     let card: RecruitmentPostCardViewModel
     let theme: MiniBiThemePalette
     let onOpenDetail: () -> Void
@@ -289,9 +473,10 @@ private struct RecruitmentPostSummaryCardView: View {
     var body: some View {
         Button(action: onOpenDetail) {
             VStack(alignment: .leading, spacing: 8) {
-                // Row 1: Full-width Project Name
-                Text(card.projectName)
+                // Row 1: 1-based Sequential Number + Full-width Project Name
+                Text("\(index). \(card.projectName)")
                     .font(.headline.weight(.bold))
+                    .monospacedDigit()
                     .foregroundColor(theme.primary)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)

@@ -3458,7 +3458,14 @@ final class HRPBTests: XCTestCase {
         briefId: String,
         projectName: String,
         creatorName: String,
-        managerName: String
+        managerName: String,
+        industrialParkId: String = "aaaaaaaa-1111-4222-8333-444444444402",
+        industrialParkCode: String = "KCN_QUANG_CHAU",
+        industrialParkName: String = "KCN Quang Châu",
+        laborTypesJson: String = """
+              {"labor_type_key": "THOI_VU", "display_name": "Thời vụ"},
+              {"labor_type_key": "CHINH_THUC", "display_name": "Chính thức"}
+        """
     ) -> String {
         """
         {
@@ -3470,9 +3477,9 @@ final class HRPBTests: XCTestCase {
             "display_name": "\(projectName)"
           },
           "industrial_park": {
-            "industrial_park_id": "aaaaaaaa-1111-4222-8333-444444444402",
-            "industrial_park_code": "KCN_QUANG_CHAU",
-            "display_name": "KCN Quang Châu",
+            "industrial_park_id": "\(industrialParkId)",
+            "industrial_park_code": "\(industrialParkCode)",
+            "display_name": "\(industrialParkName)",
             "active": true
           },
           "province": {
@@ -3498,8 +3505,7 @@ final class HRPBTests: XCTestCase {
             "manager_name": "\(managerName)",
             "manager_phone": "0988111222",
             "labor_types": [
-              {"labor_type_key": "THOI_VU", "display_name": "Thời vụ"},
-              {"labor_type_key": "CHINH_THUC", "display_name": "Chính thức"}
+        \(laborTypesJson)
             ],
             "supply_schedule_text": "Tuyển liên tục",
             "expected_headcount": 150
@@ -4800,5 +4806,308 @@ final class HRPBTests: XCTestCase {
 
         vm.navigateTo(.newEntry)
         XCTAssertEqual(vm.currentDestination, .newEntry)
+    }
+
+    // MARK: - Round 7: Full Name Resolution for Login Handles, Gender Label & Recruitment Filters
+
+    @MainActor
+    func testRound7_LoginHandleDetectionAndRealVietnameseFullNameResolution() async throws {
+        // 1. Login handle detection rules
+        XCTAssertTrue(MiniBiUser.looksLikeLoginHandle("sampt.td", username: "sampt.td"))
+        XCTAssertTrue(MiniBiUser.looksLikeLoginHandle("sampt.td"))
+        XCTAssertTrue(MiniBiUser.looksLikeLoginHandle("luanpt_01"))
+        XCTAssertTrue(MiniBiUser.looksLikeLoginHandle("sampt@hrpartner.vn"))
+        XCTAssertTrue(MiniBiUser.looksLikeLoginHandle("   "))
+        XCTAssertFalse(MiniBiUser.looksLikeLoginHandle("Phạm Thái Sâm", username: "sampt.td"))
+        XCTAssertFalse(MiniBiUser.looksLikeLoginHandle("Nhân sự Mặc Định"))
+
+        // 2. Active resolution via /api/attendance/history?limit=1 + Keychain cache + SavedLoginAccount update
+        let samUserId = "77777777-2222-4333-8444-555555555501"
+        var attendanceHistoryCallCount = 0
+
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.requestHandler = { req in
+            let url = try XCTUnwrap(req.url)
+            let fullUrl = url.absoluteString
+            let body: String
+            if fullUrl.contains("/api/auth/login") || fullUrl.contains("/api/auth/session") || fullUrl.contains("/api/direct-entry/session") {
+                body = """
+                {
+                  "ok": true,
+                  "token": "tok-sam-r7",
+                  "actor": {
+                    "app_user_id": "\(samUserId)",
+                    "username": "sampt.td",
+                    "display_name": "sampt.td",
+                    "self_recruiter_suggestion": "rec-sam-01",
+                    "capabilities": ["entry_read", "entry_create"],
+                    "allowed_worker_tabs": ["recruited"]
+                  }
+                }
+                """
+            } else if fullUrl.contains("/api/attendance/history") {
+                attendanceHistoryCallCount += 1
+                body = """
+                {
+                  "ok": true,
+                  "data": {
+                    "items": [
+                      {
+                        "id": "att-sam-1",
+                        "employee_display_name": "Phạm Thái Sâm",
+                        "checked_in_at": "2026-11-12T08:00:00Z",
+                        "status": "VALID"
+                      }
+                    ]
+                  }
+                }
+                """
+            } else {
+                body = #"{"ok":true}"#
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(body.utf8))
+        }
+
+        let keychain = KeychainStore(serviceName: "com.aistudio.minibi.r7sam.\(UUID().uuidString)")
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: keychain)
+        repo.saveOrUpdateLoginAccount(username: "sampt.td", password: "secret", displayName: "sampt.td")
+
+        let loginResult = await repo.login(username: "sampt.td", password: "secret")
+        guard case .success(let loggedInUser) = loginResult else {
+            XCTFail("Expected login success")
+            return
+        }
+        XCTAssertEqual(loggedInUser.fullName, "Phạm Thái Sâm")
+        XCTAssertEqual(loggedInUser.selfRecruiterSuggestion, "rec-sam-01")
+        XCTAssertEqual(attendanceHistoryCallCount, 1)
+        XCTAssertEqual(repo.getCachedResolvedFullName(forUserId: samUserId, username: "sampt.td"), "Phạm Thái Sâm")
+        XCTAssertEqual(repo.getSavedLoginAccounts().first?.displayName, "Phạm Thái Sâm")
+
+        // Subsequent session restore hits Keychain cache immediately without calling /api/attendance/history again
+        let sessionResult = await repo.fetchCurrentUser()
+        guard case .success(let restoredUser) = sessionResult else {
+            XCTFail("Expected fetchCurrentUser success")
+            return
+        }
+        XCTAssertEqual(restoredUser.fullName, "Phạm Thái Sâm")
+        XCTAssertEqual(attendanceHistoryCallCount, 1, "Cached full name must prevent redundant fallback network calls")
+
+        // 3. Fallback chain via /api/leave/me + /api/direct-entry/catalog when attendance history & obligations have no items
+        let recUserId = "77777777-2222-4333-8444-555555555502"
+        MockURLProtocol.requestHandler = { req in
+            let url = try XCTUnwrap(req.url)
+            let fullUrl = url.absoluteString
+            let body: String
+            if fullUrl.contains("/api/auth/session") || fullUrl.contains("/api/direct-entry/session") {
+                body = """
+                {
+                  "ok": true,
+                  "actor": {
+                    "app_user_id": "\(recUserId)",
+                    "username": "sampt.td",
+                    "display_name": "sampt.td",
+                    "self_recruiter_suggestion": "rec-sam-02",
+                    "capabilities": ["entry_read"]
+                  }
+                }
+                """
+            } else if fullUrl.contains("/api/attendance/history") {
+                body = #"{"ok":true,"data":{"items":[]}}"#
+            } else if fullUrl.contains("/api/work-reports/obligations") {
+                body = #"{"ok":true,"items":[]}"#
+            } else if fullUrl.contains("/api/leave/me") {
+                body = """
+                {
+                  "ok": true,
+                  "data": {
+                    "account": {
+                      "app_user_id": "\(recUserId)",
+                      "display_name": "sampt.td",
+                      "recruiter_id": "rec-sam-02"
+                    }
+                  }
+                }
+                """
+            } else if fullUrl.contains("/api/direct-entry/catalog") {
+                body = """
+                {
+                  "ok": true,
+                  "projects": [],
+                  "recruiters": [
+                    {"recruiter_id": "rec-sam-02", "display_name": "Phạm Thái Sâm"}
+                  ],
+                  "banks": [],
+                  "labor_types": []
+                }
+                """
+            } else {
+                body = #"{"ok":true}"#
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(body.utf8))
+        }
+
+        let keychain2 = KeychainStore(serviceName: "com.aistudio.minibi.r7sam2.\(UUID().uuidString)")
+        let repo2 = MiniBiRepository(httpClient: client, keychain: keychain2)
+        let sessionResult2 = await repo2.fetchCurrentUser()
+        guard case .success(let catalogResolvedUser) = sessionResult2 else {
+            XCTFail("Expected fetchCurrentUser success via catalog fallback")
+            return
+        }
+        XCTAssertEqual(catalogResolvedUser.fullName, "Phạm Thái Sâm")
+    }
+
+    @MainActor
+    func testRound7_RecruitmentPostsGenderLabelFiltersAndAutoLoadPages() async throws {
+        // 1. Gender label for ANY must be "Nam/Nữ" (not "Cặp Nam/Nữ")
+        XCTAssertEqual(RecruitmentPostContract.genderRequirementLabels["ANY"], "Nam/Nữ")
+
+        let brief1 = "77777777-2222-4333-8444-666666666601"
+        let brief2 = "77777777-2222-4333-8444-666666666602"
+        let brief3 = "77777777-2222-4333-8444-666666666603"
+        let ipQuangChau = "aaaaaaaa-1111-4222-8333-444444444402"
+        let ipVanTrung = "bbbbbbbb-1111-4222-8333-444444444402"
+
+        let post1Json = Self.makeRecruitmentPostJson(
+            briefId: brief1,
+            projectName: "Luxshare Quang Châu 1",
+            creatorName: "Phạm Thái Sâm",
+            managerName: "Quản Lý 1",
+            industrialParkId: ipQuangChau,
+            industrialParkCode: "KCN_QUANG_CHAU",
+            industrialParkName: "KCN Quang Châu",
+            laborTypesJson: #"{"labor_type_key": "THOI_VU", "display_name": "Thời vụ"}"#
+        )
+        let post2Json = Self.makeRecruitmentPostJson(
+            briefId: brief2,
+            projectName: "Foxconn Vân Trung 2",
+            creatorName: "Phạm Thái Sâm",
+            managerName: "Quản Lý 2",
+            industrialParkId: ipVanTrung,
+            industrialParkCode: "KCN_VAN_TRUNG",
+            industrialParkName: "KCN Vân Trung",
+            laborTypesJson: #"{"labor_type_key": "CHINH_THUC", "display_name": "Chính thức"}"#
+        )
+        let post3Json = Self.makeRecruitmentPostJson(
+            briefId: brief3,
+            projectName: "Goertek Quang Châu 3",
+            creatorName: "Phạm Thái Sâm",
+            managerName: "Quản Lý 3",
+            industrialParkId: ipQuangChau,
+            industrialParkCode: "KCN_QUANG_CHAU",
+            industrialParkName: "KCN Quang Châu",
+            laborTypesJson: #"{"labor_type_key": "CHINH_THUC", "display_name": "Chính thức"}"#
+        )
+
+        let detailObj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data("{\"ok\":true,\"data\":{\"post\":\(post1Json)}}".utf8)) as? [String: Any])
+        let parsedDetail = try RecruitmentPostContract.parseDetailEnvelope(detailObj)
+        let cardVm = RecruitmentPostContract.toCardViewModel(parsedDetail)
+        let detailVm = RecruitmentPostContract.toDetailViewModel(parsedDetail)
+        XCTAssertEqual(cardVm.genderDisplay, "Nam/Nữ")
+        XCTAssertEqual(detailVm.section2CandidateRequirements.genderDisplay, "Nam/Nữ")
+        XCTAssertEqual(cardVm.industrialParkId, ipQuangChau)
+        XCTAssertEqual(cardVm.industrialParkName, "KCN Quang Châu")
+        XCTAssertEqual(cardVm.laborTypes.map(\.laborTypeKey), ["THOI_VU"])
+
+        // 2. ViewModel KCN + Hình thức filtering and auto-loading all pages
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.requestHandler = { req in
+            let url = try XCTUnwrap(req.url)
+            let fullUrl = url.absoluteString
+            let body: String
+            if fullUrl.contains("/api/recruitment-posts?") {
+                if fullUrl.contains("cursor=cur-r7-p2") {
+                    body = """
+                    {
+                      "ok": true,
+                      "data": {
+                        "items": [\(post3Json)],
+                        "page_size": 10,
+                        "has_more": false,
+                        "next_cursor": null,
+                        "snapshot_token": "snap-r7"
+                      }
+                    }
+                    """
+                } else {
+                    body = """
+                    {
+                      "ok": true,
+                      "data": {
+                        "items": [\(post1Json), \(post2Json)],
+                        "page_size": 10,
+                        "has_more": true,
+                        "next_cursor": "cur-r7-p2",
+                        "snapshot_token": "snap-r7"
+                      }
+                    }
+                    """
+                }
+            } else {
+                body = #"{"ok":true}"#
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(body.utf8))
+        }
+
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.r7rec.\(UUID().uuidString)"))
+        let vm = MiniBiViewModel(
+            repository: repo,
+            directEntryService: DirectEntryService(httpClient: client),
+            workReportsService: WorkReportsAndReportingService(httpClient: client),
+            salaryAdvanceService: SalaryAdvanceService(httpClient: client),
+            recruitmentPostService: RecruitmentPostService(httpClient: client)
+        )
+        vm.currentUser = MiniBiUser(
+            id: "aaaa0023-2222-4333-8444-555555555599",
+            username: "sampt.td",
+            fullName: "Phạm Thái Sâm",
+            permissions: ["entry_read"],
+            allowedWorkerTabs: ["recruited"]
+        )
+        vm.isAuthenticated = true
+
+        await vm.loadRecruitmentPosts(reset: true)
+        XCTAssertEqual(vm.recruitmentPosts.map(\.briefId), [brief1, brief2])
+        XCTAssertTrue(vm.recruitmentPostsHasMore)
+        XCTAssertFalse(vm.hasActiveRecruitmentPostFilter)
+        XCTAssertEqual(vm.filteredRecruitmentPosts.map(\.briefId), [brief1, brief2])
+
+        // Selecting KCN filter triggers auto-loading of remaining pages
+        await vm.selectRecruitmentIndustrialParkFilter(ipQuangChau)
+        XCTAssertTrue(vm.hasActiveRecruitmentPostFilter)
+        XCTAssertEqual(vm.recruitmentPosts.map(\.briefId), [brief1, brief2, brief3])
+        XCTAssertEqual(vm.filteredRecruitmentPosts.map(\.briefId), [brief1, brief3])
+        XCTAssertEqual(vm.availableRecruitmentIndustrialParkFilters.map(\.industrialParkId), [ipQuangChau, ipVanTrung])
+        XCTAssertEqual(vm.availableRecruitmentLaborTypeFilters.map(\.laborTypeKey), ["CHINH_THUC", "THOI_VU"])
+
+        // Combining KCN + Hình thức filter narrows down to brief3
+        await vm.selectRecruitmentLaborTypeFilter("CHINH_THUC")
+        XCTAssertEqual(vm.filteredRecruitmentPosts.map(\.briefId), [brief3])
+
+        // Pull-to-refresh preserves active filters and auto-loads remaining pages
+        await vm.loadRecruitmentPosts(reset: true)
+        XCTAssertEqual(vm.selectedRecruitmentIndustrialParkId, ipQuangChau)
+        XCTAssertEqual(vm.selectedRecruitmentLaborTypeKey, "CHINH_THUC")
+        XCTAssertEqual(vm.recruitmentPosts.map(\.briefId), [brief1, brief2, brief3])
+        XCTAssertEqual(vm.filteredRecruitmentPosts.map(\.briefId), [brief3])
+
+        // Clearing filters restores full list
+        vm.clearRecruitmentPostFilters()
+        XCTAssertFalse(vm.hasActiveRecruitmentPostFilter)
+        XCTAssertNil(vm.selectedRecruitmentIndustrialParkId)
+        XCTAssertNil(vm.selectedRecruitmentLaborTypeKey)
+        XCTAssertEqual(vm.filteredRecruitmentPosts.map(\.briefId), [brief1, brief2, brief3])
+
+        // Logout resets filters to nil
+        await vm.selectRecruitmentIndustrialParkFilter(ipVanTrung)
+        await vm.selectRecruitmentLaborTypeFilter("CHINH_THUC")
+        await vm.performLogout()
+        XCTAssertNil(vm.selectedRecruitmentIndustrialParkId)
+        XCTAssertNil(vm.selectedRecruitmentLaborTypeKey)
+        XCTAssertTrue(vm.recruitmentPosts.isEmpty)
     }
 }

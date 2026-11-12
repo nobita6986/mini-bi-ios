@@ -174,7 +174,7 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
 
     public let id: String
     public let username: String
-    public let fullName: String
+    public var fullName: String
     public let role: String
     public let roleLabel: String
     public let email: String
@@ -182,6 +182,30 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
     public let teamName: String
     public let permissions: [String]
     public var allowedWorkerTabs: [String]
+    public var selfRecruiterSuggestion: String?
+
+    public static func looksLikeLoginHandle(_ text: String, username: String = "") -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return true
+        }
+        let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanUsername.isEmpty && trimmed.caseInsensitiveCompare(cleanUsername) == .orderedSame {
+            return true
+        }
+        if trimmed.contains("@") {
+            return true
+        }
+        if trimmed.rangeOfCharacter(from: .whitespacesAndNewlines) == nil {
+            let allowedHandleScalars = CharacterSet(
+                charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+            )
+            if trimmed.unicodeScalars.allSatisfy({ allowedHandleScalars.contains($0) }) {
+                return true
+            }
+        }
+        return false
+    }
 
     public var allowedWorkerScopes: [String] {
         get { allowedWorkerTabs }
@@ -248,7 +272,8 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         teamName: String = "",
         permissions: [String] = [],
         allowedWorkerTabs: [String]? = nil,
-        allowedWorkerScopes: [String] = []
+        allowedWorkerScopes: [String] = [],
+        selfRecruiterSuggestion: String? = nil
     ) {
         self.id = id
         self.username = username
@@ -260,6 +285,8 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         self.teamName = teamName
         self.permissions = permissions
         self.allowedWorkerTabs = Self.sanitizeAllowedWorkerTabs(allowedWorkerTabs ?? allowedWorkerScopes)
+        let cleanSuggestion = selfRecruiterSuggestion?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.selfRecruiterSuggestion = cleanSuggestion.isEmpty ? nil : cleanSuggestion
     }
 }
 
@@ -2048,6 +2075,8 @@ public struct WorkReportObligationItem: Identifiable, Equatable, Sendable {
     public var reviewerName: String?
     public var reviewComment: String?
     public var unitName: String?
+    public var assigneeUserId: String
+    public var assigneeDisplayName: String
     public var sections: [WorkReportSectionSchema]
     public var formPayload: [String: String]
 
@@ -2071,6 +2100,8 @@ public struct WorkReportObligationItem: Identifiable, Equatable, Sendable {
         reviewerName: String? = nil,
         reviewComment: String? = nil,
         unitName: String? = nil,
+        assigneeUserId: String = "",
+        assigneeDisplayName: String = "",
         sections: [WorkReportSectionSchema] = [],
         formPayload: [String: String] = [:]
     ) {
@@ -2093,6 +2124,8 @@ public struct WorkReportObligationItem: Identifiable, Equatable, Sendable {
         self.reviewerName = reviewerName
         self.reviewComment = reviewComment
         self.unitName = unitName
+        self.assigneeUserId = assigneeUserId
+        self.assigneeDisplayName = assigneeDisplayName
         self.sections = sections
         self.formPayload = formPayload
     }
