@@ -140,6 +140,122 @@ public enum WorkReportsContract {
         return String(format: "%.1f%%", pct)
     }
 
+    public static func normalizeDateIso(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let prefix10 = String(trimmed.prefix(10))
+        let parts = prefix10.split(separator: "/")
+        if parts.count == 3, parts[0].count == 2, parts[1].count == 2, parts[2].count == 4 {
+            return "\(parts[2])-\(parts[1])-\(parts[0])"
+        }
+        return prefix10
+    }
+
+    public static func computeHiringDaySummary(byDateCounts: [String: Int]) -> HiringDaySummary {
+        let positive = byDateCounts
+            .map { (date: normalizeDateIso($0.key), count: $0.value) }
+            .filter { !$0.date.isEmpty && $0.count > 0 }
+        guard !positive.isEmpty else {
+            return HiringDaySummary()
+        }
+        var merged: [String: Int] = [:]
+        for item in positive {
+            merged[item.date, default: 0] += item.count
+        }
+        let activeDays = merged.count
+        let totalCount = merged.values.reduce(0, +)
+        let avg = Double(totalCount) / Double(activeDays)
+        let peak = merged.sorted { lhs, rhs in
+            if lhs.value != rhs.value { return lhs.value > rhs.value }
+            return lhs.key > rhs.key
+        }.first
+        return HiringDaySummary(
+            activeHiringDays: activeDays,
+            avgPerActiveDay: avg,
+            peakDailyCount: peak?.value,
+            peakDateIso: peak?.key
+        )
+    }
+
+    public static func extractByDateCounts(
+        from report: [String: Any],
+        fallbackRows: [TeamDrillDownItem] = []
+    ) -> [String: Int] {
+        var counts: [String: Int] = [:]
+        for key in ["byDate", "by_date"] {
+            if let dict = report[key] as? [String: Any] {
+                for (k, v) in dict {
+                    let dateIso = normalizeDateIso(k)
+                    guard !dateIso.isEmpty else { continue }
+                    let cnt: Int
+                    if let i = v as? Int {
+                        cnt = i
+                    } else if let n = v as? NSNumber {
+                        cnt = n.intValue
+                    } else if let obj = v as? [String: Any] {
+                        cnt = obj.optInt("recruitedCount", "recruited_count", "count", "total", "total_count", "eligible_episode_count")
+                    } else if let s = v as? String, let parsed = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                        cnt = parsed
+                    } else {
+                        cnt = 0
+                    }
+                    if cnt > 0 {
+                        counts[dateIso, default: 0] += cnt
+                    }
+                }
+            } else {
+                let arr = report.optObjectArray(key)
+                for obj in arr {
+                    let dateIso = normalizeDateIso(obj.optString("date", "businessDate", "business_date", "key"))
+                    let cnt = obj.optInt("recruitedCount", "recruited_count", "count", "total", "total_count", "eligible_episode_count")
+                    if !dateIso.isEmpty && cnt > 0 {
+                        counts[dateIso, default: 0] += cnt
+                    }
+                }
+            }
+            if !counts.isEmpty { break }
+        }
+        if counts.isEmpty && !fallbackRows.isEmpty {
+            for row in fallbackRows {
+                let dateIso = normalizeDateIso(row.businessDate)
+                if !dateIso.isEmpty && row.recruitedCount > 0 {
+                    counts[dateIso, default: 0] += row.recruitedCount
+                }
+            }
+        }
+        return counts
+    }
+
+    public static func computeHiringDaySummary(
+        fromReport report: [String: Any],
+        fallbackRows: [TeamDrillDownItem] = []
+    ) -> HiringDaySummary {
+        let counts = extractByDateCounts(from: report, fallbackRows: fallbackRows)
+        return computeHiringDaySummary(byDateCounts: counts)
+    }
+
+    public static func computeHiringDaySummary(fromDrillDownRows rows: [TeamDrillDownItem]) -> HiringDaySummary {
+        var counts: [String: Int] = [:]
+        for row in rows {
+            let dateIso = normalizeDateIso(row.businessDate)
+            if !dateIso.isEmpty && row.recruitedCount > 0 {
+                counts[dateIso, default: 0] += row.recruitedCount
+            }
+        }
+        return computeHiringDaySummary(byDateCounts: counts)
+    }
+
+    public static func computeHiringDaySummary(fromWorkers workers: [WorkerItem]) -> HiringDaySummary {
+        var counts: [String: Int] = [:]
+        for w in workers {
+            let dateIso = normalizeDateIso(w.ngayVaoLam)
+            if !dateIso.isEmpty {
+                counts[dateIso, default: 0] += 1
+            }
+        }
+        return computeHiringDaySummary(byDateCounts: counts)
+    }
+
     public static func parseDynamicSections(_ schemaRaw: Any?) -> [WorkReportSectionSchema] {
         let dict: [String: Any]?
         if let d = schemaRaw as? [String: Any] {
@@ -470,6 +586,11 @@ public struct PeriodAllScopeAggregation {
     public let teamBuckets: [DistributionBucket]
     public let providerBuckets: [DistributionBucket]
     public let teams: [TeamSummaryRow]
+    public let byRecruiterItems: [BiBucketItem]
+    public let byProjectItems: [BiBucketItem]
+    public let byTeamItems: [BiBucketItem]
+    public let byProviderItems: [BiBucketItem]
+    public let hiringSummary: HiringDaySummary
 }
 
 private actor DashboardReportingCoalescer {
@@ -479,7 +600,40 @@ private actor DashboardReportingCoalescer {
     private var inFlightPeriodAgg: [String: Task<PeriodAllScopeAggregation?, Never>] = [:]
     private var cachedPeriodAgg: [String: (timestamp: Date, value: PeriodAllScopeAggregation)] = [:]
 
+    private var cachedAdminTeamMap: [String: String]?
+    private var verifiedCatalogTeamCodes: Set<String> = []
+    private var inFlightAdminTeamMap: Task<([String: String], Set<String>), Never>?
+
     private let cacheTtlSeconds: TimeInterval = 2.5
+
+    func fetchAdminTeamMap(
+        canFetchRemote: Bool,
+        defaultMap: [String: String],
+        loader: @escaping @Sendable () async -> ([String: String], Set<String>)
+    ) async -> (map: [String: String], verifiedCodes: Set<String>) {
+        if let cachedAdminTeamMap {
+            return (cachedAdminTeamMap, verifiedCatalogTeamCodes)
+        }
+        guard canFetchRemote else {
+            return (defaultMap, verifiedCatalogTeamCodes)
+        }
+        if let existing = inFlightAdminTeamMap {
+            let res = await existing.value
+            return (res.0, res.1)
+        }
+        let task = Task {
+            await loader()
+        }
+        inFlightAdminTeamMap = task
+        let (loadedMap, verified) = await task.value
+        inFlightAdminTeamMap = nil
+        if !loadedMap.isEmpty {
+            cachedAdminTeamMap = loadedMap
+            verifiedCatalogTeamCodes.formUnion(verified)
+            return (loadedMap, verifiedCatalogTeamCodes)
+        }
+        return (defaultMap, verifiedCatalogTeamCodes)
+    }
 
     func fetchWorkforceDeep(
         key: String,
@@ -1032,42 +1186,196 @@ public final class WorkReportsAndReportingService {
         return queryItems
     }
 
-    private static let canonicalTeamCodeMap: [String: String] = [
+    public static let canonicalTeamCodeMap: [String: String] = [
         "__system_vendor__": "__system_vendor__",
         "tài khoản nhà cung cấp": "__system_vendor__",
+        "nhóm hệ thống vendor": "__system_vendor__",
+        "hệ thống vendor": "__system_vendor__",
         "hungyen": "hungyen",
         "nhóm hưng yên": "hungyen",
+        "hưng yên": "hungyen",
+        "team hưng yên": "hungyen",
         "marketing": "marketing",
         "bộ phận marketing": "marketing",
+        "nhóm marketing": "marketing",
+        "team marketing": "marketing",
         "team1": "TEAM1",
+        "team 1": "TEAM1",
+        "nhóm 1": "TEAM1",
         "nhóm tuyển dụng 1": "TEAM1",
         "team2": "TEAM2",
+        "team 2": "TEAM2",
+        "nhóm 2": "TEAM2",
         "nhóm tuyển dụng 2": "TEAM2",
         "team3": "TEAM3",
+        "team 3": "TEAM3",
+        "nhóm 3": "TEAM3",
         "nhóm tuyển dụng 3": "TEAM3",
         "team4": "TEAM4",
+        "team 4": "TEAM4",
+        "nhóm 4": "TEAM4",
         "nhóm tuyển dụng 4": "TEAM4",
         "team5": "TEAM5",
+        "team 5": "TEAM5",
+        "nhóm 5": "TEAM5",
         "nhóm tuyển dụng 5": "TEAM5",
         "team6": "TEAM6",
+        "team 6": "TEAM6",
+        "nhóm 6": "TEAM6",
         "nhóm tuyển dụng 6": "TEAM6",
         "team7": "TEAM7",
+        "team 7": "TEAM7",
+        "nhóm 7": "TEAM7",
         "nhóm tuyển dụng 7": "TEAM7",
         "unknown": "unknown",
         "chưa gán nhóm": "unknown"
     ]
 
-    private static func resolveCanonicalTeamCode(rawKey: String, rawDisplay: String) -> String {
+    public static func resolveCanonicalTeamCode(rawKey: String, rawDisplay: String) -> String {
         let keyTrim = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let dispTrim = rawDisplay.trimmingCharacters(in: .whitespacesAndNewlines)
         let keyLower = keyTrim.lowercased()
         let dispLower = dispTrim.lowercased()
         if let mapped = canonicalTeamCodeMap[keyLower] { return mapped }
         if let mapped = canonicalTeamCodeMap[dispLower] { return mapped }
-        if keyLower.hasPrefix("team"), keyLower.count >= 5 {
-            return keyTrim.uppercased()
+        let decoded = decodeTeamBucketCode(keyTrim)
+        let decodedLower = decoded.lowercased()
+        if let mapped = canonicalTeamCodeMap[decodedLower] { return mapped }
+        if decodedLower.hasPrefix("team"), decodedLower.count >= 5 {
+            let suffix = decoded.dropFirst(4).trimmingCharacters(in: CharacterSet(charactersIn: " _-"))
+            if !suffix.isEmpty, suffix.allSatisfy(\.isNumber) {
+                return "TEAM\(suffix)"
+            }
+            return decoded.uppercased()
         }
-        return keyTrim.isEmpty ? "unknown" : keyTrim
+        for candidate in [dispLower, keyLower] {
+            for prefix in ["nhóm tuyển dụng ", "nhóm ", "team "] where candidate.hasPrefix(prefix) {
+                let suffix = candidate.dropFirst(prefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !suffix.isEmpty, suffix.allSatisfy(\.isNumber) {
+                    return "TEAM\(suffix)"
+                }
+            }
+        }
+        return decoded.isEmpty ? "unknown" : decoded
+    }
+
+    public static func candidateTeamCodes(
+        rawKey: String,
+        rawDisplay: String = "",
+        dynamicMap: [String: String] = [:]
+    ) -> [String] {
+        let cleanRaw = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let decoded = decodeTeamBucketCode(cleanRaw)
+        let cleanDisp = rawDisplay.trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidates: [String] = []
+        var seen = Set<String>()
+
+        func appendCandidate(_ raw: String?) {
+            guard let raw else { return }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("team.") else { return }
+            if !seen.contains(trimmed) {
+                seen.insert(trimmed)
+                candidates.append(trimmed)
+            }
+        }
+
+        if cleanRaw.lowercased().hasPrefix("team.") || cleanRaw.lowercased().hasPrefix("team:") {
+            appendCandidate(decoded)
+        }
+        appendCandidate(dynamicMap[cleanRaw.lowercased()])
+        appendCandidate(dynamicMap[decoded.lowercased()])
+        if !cleanDisp.isEmpty {
+            appendCandidate(dynamicMap[cleanDisp.lowercased()])
+        }
+        let resolved = resolveCanonicalTeamCode(rawKey: decoded, rawDisplay: cleanDisp)
+        appendCandidate(resolved)
+        appendCandidate(decoded)
+        if decoded.lowercased() != "unknown" && decoded.lowercased() != "__system_vendor__" {
+            appendCandidate(decoded.uppercased())
+            appendCandidate(decoded.lowercased())
+        }
+        if candidates.isEmpty {
+            appendCandidate("unknown")
+        }
+        return candidates
+    }
+
+    public func fetchAdminTeamCodeMap(canManageTeamCatalog: Bool) async -> [String: String] {
+        let res = await fetchAdminTeamCatalogMetadata(canManageTeamCatalog: canManageTeamCatalog)
+        return res.map
+    }
+
+    private func fetchAdminTeamCatalogMetadata(
+        canManageTeamCatalog: Bool
+    ) async -> (map: [String: String], verifiedCodes: Set<String>) {
+        let defaultMap = Self.canonicalTeamCodeMap
+        let defaultVerified = Set(defaultMap.values.map { $0.lowercased() })
+        guard canManageTeamCatalog else {
+            return (defaultMap, defaultVerified)
+        }
+        let client = self.httpClient
+        return await reportingCoalescer.fetchAdminTeamMap(
+            canFetchRemote: true,
+            defaultMap: defaultMap
+        ) {
+            var map = defaultMap
+            var verified = defaultVerified
+            let resp = await client.request(
+                method: "GET",
+                path: "/api/admin/catalog/teams",
+                queryItems: [
+                    URLQueryItem(name: "include_inactive", value: "true"),
+                    URLQueryItem(name: "page", value: "1"),
+                    URLQueryItem(name: "page_size", value: "100")
+                ]
+            )
+            guard resp.isSuccess, let root = resp.jsonObject else {
+                return ( [:], verified )
+            }
+            let dataObj = (root["data"] as? [String: Any]) ?? root
+            let items = root.optObjectArray("items", "teams")
+                .ifEmpty(dataObj.optObjectArray("items", "teams"))
+            for item in items {
+                let teamId = item.optString("team_id", "id")
+                let teamCode = item.optString("team_code", "code", "key")
+                let displayName = item.optString("display_name", "display", "name", "team_name")
+                guard !teamCode.isEmpty else { continue }
+                verified.insert(teamCode.lowercased())
+                map[teamCode.lowercased()] = teamCode
+                map[Self.encodeTeamBucketKey(teamCode).lowercased()] = teamCode
+                if !teamId.isEmpty {
+                    map[teamId.lowercased()] = teamCode
+                    map[Self.encodeTeamBucketKey(teamId).lowercased()] = teamCode
+                }
+                if !displayName.isEmpty {
+                    map[displayName.lowercased()] = teamCode
+                }
+            }
+            return (map, verified)
+        }
+    }
+
+    public static func defaultTeamDisplayName(for bucketKeyOrCode: String) -> String {
+        let decoded = decodeTeamBucketCode(bucketKeyOrCode).trimmingCharacters(in: .whitespacesAndNewlines)
+        switch decoded.lowercased() {
+        case "unknown", "":
+            return "Chưa gán nhóm"
+        case "__system_vendor__":
+            return "Tài khoản nhà cung cấp"
+        case "hungyen":
+            return "Nhóm Hưng Yên"
+        case "marketing":
+            return "Bộ phận Marketing"
+        default:
+            if decoded.lowercased().hasPrefix("team"), decoded.count > 4 {
+                let suffix = decoded.dropFirst(4).trimmingCharacters(in: CharacterSet(charactersIn: " _-"))
+                if !suffix.isEmpty, suffix.allSatisfy(\.isNumber) {
+                    return "Nhóm Tuyển dụng \(suffix)"
+                }
+            }
+            return decoded
+        }
     }
 
     public static func leaveCategoryLabelVi(_ key: String, fallback: String = "") -> String {
@@ -1134,6 +1442,12 @@ public final class WorkReportsAndReportingService {
 
     public static func decodeTeamBucketCode(_ rawTeamCodeOrBucketKey: String) -> String {
         let trimmed = rawTeamCodeOrBucketKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("team:") {
+            let stripped = String(trimmed.dropFirst("team:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !stripped.isEmpty {
+                return stripped
+            }
+        }
         guard trimmed.hasPrefix("team.") else { return trimmed }
         var b64 = String(trimmed.dropFirst("team.".count))
             .replacingOccurrences(of: "-", with: "+")
@@ -1150,57 +1464,135 @@ public final class WorkReportsAndReportingService {
         return trimmed
     }
 
-    private static func parseReportingBucketEntries(
+    /// Parses bucket entries from `/api/reporting/team-report` or `/api/reporting/workforce-deep`.
+    /// Strictly preserves `nil` for `onCount`, `offCount`, `unconfirmedCount` when those keys are absent in JSON —
+    /// NEVER defaults `onCount` to `count`!
+    public static func parseReportingBucketEntries(
         from report: [String: Any],
         keys: [String]
-    ) -> [(key: String, display: String, totalCount: Int, onCount: Int, offCount: Int, unconfirmedCount: Int)] {
+    ) -> [(key: String, display: String, totalCount: Int, onCount: Int?, offCount: Int?, unconfirmedCount: Int?)] {
         for key in keys {
             if let dict = report[key] as? [String: Any] {
-                var rows: [(key: String, display: String, totalCount: Int, onCount: Int, offCount: Int, unconfirmedCount: Int)] = []
+                var rows: [(key: String, display: String, totalCount: Int, onCount: Int?, offCount: Int?, unconfirmedCount: Int?)] = []
                 for (mapKey, val) in dict {
-                    guard let obj = val as? [String: Any] else { continue }
-                    let count = obj.optInt("recruitedCount", "recruited_count", "total_count", "totalCount", "eligible_episode_count", "count")
-                    guard count > 0 else { continue }
-                    let itemKey = obj.optString("key", defaultValue: mapKey)
-                    let display = obj.optString("display", "label", "name", defaultValue: itemKey)
-                    let onCnt = obj.optInt("on_count", "onCount", defaultValue: count)
-                    let offCnt = obj.optInt("off_count", "offCount")
-                    let unconfCnt = obj.optInt("unconfirmed_count", "unconfirmedCount")
-                    rows.append((itemKey, display, count, onCnt, offCnt, unconfCnt))
+                    if let obj = val as? [String: Any] {
+                        let count = obj.optInt("recruitedCount", "recruited_count", "total_count", "totalCount", "eligible_episode_count", "count", "total")
+                        guard count > 0 else { continue }
+                        let itemKey = obj.optString(
+                            "key", "recruiterKey", "recruiter_key", "projectKey", "project_key",
+                            "employmentTypeKey", "employment_type_key", "providerTypeKey", "provider_type_key",
+                            "project_id", "recruiter_id", "id", "code",
+                            defaultValue: mapKey
+                        )
+                        let display = normalizeBucketDisplay(
+                            rawDisplay: obj.optString(
+                                "display", "displayName", "display_name",
+                                "recruiterDisplay", "recruiter_display",
+                                "projectDisplay", "project_display",
+                                "employmentTypeDisplay", "employment_type_display",
+                                "providerTypeDisplay", "provider_type_display",
+                                "label", "name",
+                                defaultValue: itemKey
+                            ),
+                            fallbackKey: itemKey
+                        )
+                        let onCnt = obj.optNullableInt("on_count", "onCount", "active_count")
+                        let offCnt = obj.optNullableInt("off_count", "offCount", "inactive_count")
+                        let unconfCnt = obj.optNullableInt("unconfirmed_count", "unconfirmedCount")
+                        rows.append((itemKey, display, count, onCnt, offCnt, unconfCnt))
+                    } else if let num = val as? NSNumber, num.intValue > 0 {
+                        let display = normalizeBucketDisplay(rawDisplay: mapKey, fallbackKey: mapKey)
+                        rows.append((mapKey, display, num.intValue, nil, nil, nil))
+                    }
                 }
-                return rows
+                return rows.sorted { $0.totalCount != $1.totalCount ? $0.totalCount > $1.totalCount : $0.display < $1.display }
             }
             let arr = report.optObjectArray(key)
             if !arr.isEmpty {
-                return arr.compactMap { obj in
-                    let count = obj.optInt("recruitedCount", "recruited_count", "total_count", "totalCount", "eligible_episode_count", "count")
+                let parsed = arr.compactMap { obj -> (key: String, display: String, totalCount: Int, onCount: Int?, offCount: Int?, unconfirmedCount: Int?)? in
+                    let count = obj.optInt("recruitedCount", "recruited_count", "total_count", "totalCount", "eligible_episode_count", "count", "total")
                     guard count > 0 else { return nil }
-                    let itemKey = obj.optString("key", "project_id", "recruiter_id", "code", defaultValue: "unknown")
-                    let display = obj.optString("display", "project_display", "recruiter_display", "label", "name", defaultValue: itemKey)
-                    let onCnt = obj.optInt("on_count", "onCount", defaultValue: count)
-                    let offCnt = obj.optInt("off_count", "offCount")
-                    let unconfCnt = obj.optInt("unconfirmed_count", "unconfirmedCount")
+                    let itemKey = obj.optString(
+                        "key", "recruiterKey", "recruiter_key", "projectKey", "project_key",
+                        "employmentTypeKey", "employment_type_key", "providerTypeKey", "provider_type_key",
+                        "project_id", "recruiter_id", "code", "id",
+                        defaultValue: "unknown"
+                    )
+                    let display = normalizeBucketDisplay(
+                        rawDisplay: obj.optString(
+                            "display", "displayName", "display_name",
+                            "recruiterDisplay", "recruiter_display",
+                            "projectDisplay", "project_display",
+                            "employmentTypeDisplay", "employment_type_display",
+                            "providerTypeDisplay", "provider_type_display",
+                            "label", "name",
+                            defaultValue: itemKey
+                        ),
+                        fallbackKey: itemKey
+                    )
+                    let onCnt = obj.optNullableInt("on_count", "onCount", "active_count")
+                    let offCnt = obj.optNullableInt("off_count", "offCount", "inactive_count")
+                    let unconfCnt = obj.optNullableInt("unconfirmed_count", "unconfirmedCount")
                     return (itemKey, display, count, onCnt, offCnt, unconfCnt)
                 }
+                return parsed.sorted { $0.totalCount != $1.totalCount ? $0.totalCount > $1.totalCount : $0.display < $1.display }
             }
         }
         return []
     }
 
+    private static func normalizeBucketDisplay(rawDisplay: String, fallbackKey: String) -> String {
+        let trimmed = rawDisplay.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = trimmed.isEmpty ? fallbackKey.trimmingCharacters(in: .whitespacesAndNewlines) : trimmed
+        switch candidate.lowercased() {
+        case "hrp":
+            return "Nội bộ HRP"
+        case "vendor":
+            return "Vendor"
+        case "thoi_vu", "seasonal":
+            return "Thời vụ"
+        case "chinh_thuc", "official":
+            return "Chính thức"
+        case "unknown":
+            return "Chưa phân loại"
+        default:
+            return candidate
+        }
+    }
+
+    public static func buildBiBucketItems(
+        from entries: [(key: String, display: String, totalCount: Int, onCount: Int?, offCount: Int?, unconfirmedCount: Int?)],
+        totalDenominator: Int = 0
+    ) -> [BiBucketItem] {
+        let sorted = entries.sorted { $0.totalCount != $1.totalCount ? $0.totalCount > $1.totalCount : $0.display < $1.display }
+        let sumCounts = sorted.reduce(0) { $0 + $1.totalCount }
+        let denom = max(1, totalDenominator > 0 ? totalDenominator : sumCounts)
+        return sorted.map { item in
+            BiBucketItem(
+                key: item.key,
+                display: item.display,
+                count: item.totalCount,
+                sharePct: Double(item.totalCount) * 100.0 / Double(denom),
+                onCount: item.onCount,
+                unconfirmedCount: item.unconfirmedCount,
+                offCount: item.offCount
+            )
+        }
+    }
+
     private func fetchSingleTeamPeriodReport(
         canonicalCode: String,
         rawKey: String,
+        rawDisplay: String = "",
+        dynamicMap: [String: String] = [:],
         startDate: String,
         endDate: String
     ) async -> [String: Any]? {
-        let decodedRaw = Self.decodeTeamBucketCode(rawKey)
-        var candidates: [String] = []
-        for c in [canonicalCode, decodedRaw, decodedRaw.uppercased(), decodedRaw.lowercased()] {
-            let trimmed = c.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty && !candidates.contains(trimmed) {
-                candidates.append(trimmed)
-            }
-        }
+        let candidates = Self.candidateTeamCodes(
+            rawKey: rawKey.isEmpty ? canonicalCode : rawKey,
+            rawDisplay: rawDisplay,
+            dynamicMap: dynamicMap
+        )
         for candidate in candidates {
             let bucketKey = Self.encodeTeamBucketKey(candidate)
             var q: [URLQueryItem] = [
@@ -1227,12 +1619,14 @@ public final class WorkReportsAndReportingService {
     private func fetchCoalescedPeriodAggregation(
         teamBucketsRaw: [[String: Any]],
         startDate: String,
-        endDate: String
+        endDate: String,
+        canManageTeamCatalog: Bool = false
     ) async -> PeriodAllScopeAggregation? {
         let cleanStart = startDate.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanEnd = endDate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanStart.isEmpty || !cleanEnd.isEmpty else { return nil }
         let cacheKey = "period_agg|\(cleanStart)|\(cleanEnd)"
+        let dynamicMap = await fetchAdminTeamCodeMap(canManageTeamCatalog: canManageTeamCatalog)
 
         struct TeamSeed: Sendable {
             let rawKey: String
@@ -1245,7 +1639,8 @@ public final class WorkReportsAndReportingService {
         for (idx, b) in teamBucketsRaw.enumerated() {
             let rawKey = b.optString("key", "team_id", "code", defaultValue: "team_\(idx)")
             let display = b.optString("display", "team_name", "name", defaultValue: rawKey)
-            let canonical = Self.resolveCanonicalTeamCode(rawKey: rawKey, rawDisplay: display)
+            let canonical = Self.candidateTeamCodes(rawKey: rawKey, rawDisplay: display, dynamicMap: dynamicMap).first
+                ?? Self.resolveCanonicalTeamCode(rawKey: rawKey, rawDisplay: display)
             let dedupKey = canonical.lowercased()
             if !seenCanonical.contains(dedupKey) {
                 seenCanonical.insert(dedupKey)
@@ -1277,6 +1672,8 @@ public final class WorkReportsAndReportingService {
                             if let rep = await self.fetchSingleTeamPeriodReport(
                                 canonicalCode: seed.canonicalCode,
                                 rawKey: seed.rawKey,
+                                rawDisplay: seed.display,
+                                dynamicMap: dynamicMap,
                                 startDate: cleanStart,
                                 endDate: cleanEnd
                             ) {
@@ -1301,9 +1698,9 @@ public final class WorkReportsAndReportingService {
                 var key: String
                 var display: String
                 var totalCount: Int = 0
-                var onCount: Int = 0
-                var offCount: Int = 0
-                var unconfirmedCount: Int = 0
+                var onCount: Int? = nil
+                var offCount: Int? = nil
+                var unconfirmedCount: Int? = nil
             }
 
             var totalWorkers = 0
@@ -1314,6 +1711,7 @@ public final class WorkReportsAndReportingService {
             var projectMap: [String: MutableBucket] = [:]
             var recruiterMap: [String: MutableBucket] = [:]
             var providerMap: [String: MutableBucket] = [:]
+            var combinedByDate: [String: Int] = [:]
             var teamRows: [TeamSummaryRow] = []
             var managerRows: [PersonPerformanceRow] = []
             var teamDistRaw: [(key: String, label: String, count: Int)] = []
@@ -1328,22 +1726,29 @@ public final class WorkReportsAndReportingService {
                     ?? [:]
 
                 let tTotal = rep.optInt("recruitedTotal", "recruited_total", defaultValue: detailObj.optInt("total", defaultValue: wfSnapObj.optInt("total_count", "totalCount", "total")))
-                let tOn = wfSnapObj.optInt("onCount", "on_count", "active_count", defaultValue: tTotal)
-                let tOff = wfSnapObj.optInt("offCount", "off_count", "inactive_count")
-                let tUnconf = wfSnapObj.optInt("unconfirmedCount", "unconfirmed_count")
+                // Strictly nullable: NEVER default onCount to tTotal!
+                let tOn = wfSnapObj.optNullableInt("onCount", "on_count", "active_count")
+                let tOff = wfSnapObj.optNullableInt("offCount", "off_count", "inactive_count")
+                let tUnconf = wfSnapObj.optNullableInt("unconfirmedCount", "unconfirmed_count")
 
                 totalWorkers += tTotal
-                activeCount += tOn
-                inactiveCount += tOff
-                unconfirmedCount += tUnconf
+                if let tOn { activeCount += tOn }
+                if let tOff { inactiveCount += tOff }
+                if let tUnconf { unconfirmedCount += tUnconf }
+
+                let sliceRows = Self.parseTeamDrillDownRows(from: detailObj, fallbackReport: rep)
+                let sliceByDate = WorkReportsContract.extractByDateCounts(from: rep, fallbackRows: sliceRows)
+                for (dateIso, cnt) in sliceByDate {
+                    combinedByDate[dateIso, default: 0] += cnt
+                }
 
                 for p in Self.parseReportingBucketEntries(from: rep, keys: ["byProject", "by_project"]) {
                     let normKey = p.key.lowercased()
                     var cur = projectMap[normKey] ?? MutableBucket(key: p.key, display: p.display)
                     cur.totalCount += p.totalCount
-                    cur.onCount += p.onCount
-                    cur.offCount += p.offCount
-                    cur.unconfirmedCount += p.unconfirmedCount
+                    if let v = p.onCount { cur.onCount = (cur.onCount ?? 0) + v }
+                    if let v = p.offCount { cur.offCount = (cur.offCount ?? 0) + v }
+                    if let v = p.unconfirmedCount { cur.unconfirmedCount = (cur.unconfirmedCount ?? 0) + v }
                     projectMap[normKey] = cur
                 }
 
@@ -1352,40 +1757,44 @@ public final class WorkReportsAndReportingService {
                     let normKey = r.key.lowercased()
                     var cur = recruiterMap[normKey] ?? MutableBucket(key: r.key, display: r.display)
                     cur.totalCount += r.totalCount
-                    cur.onCount += r.onCount
-                    cur.offCount += r.offCount
-                    cur.unconfirmedCount += r.unconfirmedCount
+                    if let v = r.onCount { cur.onCount = (cur.onCount ?? 0) + v }
+                    if let v = r.offCount { cur.offCount = (cur.offCount ?? 0) + v }
+                    if let v = r.unconfirmedCount { cur.unconfirmedCount = (cur.unconfirmedCount ?? 0) + v }
                     recruiterMap[normKey] = cur
 
                     if slice.seed.canonicalCode != "unknown" {
+                        let mOn = r.onCount ?? 0
+                        let mOff = r.offCount ?? 0
                         teamMembers.append(
                             PersonPerformanceRow(
                                 id: "\(slice.seed.rawKey)_\(r.key)",
                                 code: r.key,
                                 name: r.display,
                                 totalCount: r.totalCount,
-                                activeCount: r.onCount,
-                                inactiveCount: r.offCount,
-                                activeRatePct: r.totalCount > 0 ? (Double(r.onCount) * 100.0 / Double(r.totalCount)) : 0.0
+                                activeCount: mOn,
+                                inactiveCount: mOff,
+                                activeRatePct: (r.onCount != nil && r.totalCount > 0) ? (Double(mOn) * 100.0 / Double(r.totalCount)) : 0.0
                             )
                         )
                     }
                 }
                 teamMembers.sort { $0.totalCount > $1.totalCount }
 
-                for pr in Self.parseReportingBucketEntries(from: rep, keys: ["byProvider", "by_provider"]) {
+                for pr in Self.parseReportingBucketEntries(from: rep, keys: ["byProvider", "by_provider", "byProviderType", "by_provider_type"]) {
                     let normKey = pr.key.lowercased()
                     var cur = providerMap[normKey] ?? MutableBucket(key: pr.key, display: pr.display)
                     cur.totalCount += pr.totalCount
-                    cur.onCount += pr.onCount
-                    cur.offCount += pr.offCount
-                    cur.unconfirmedCount += pr.unconfirmedCount
+                    if let v = pr.onCount { cur.onCount = (cur.onCount ?? 0) + v }
+                    if let v = pr.offCount { cur.offCount = (cur.offCount ?? 0) + v }
+                    if let v = pr.unconfirmedCount { cur.unconfirmedCount = (cur.unconfirmedCount ?? 0) + v }
                     providerMap[normKey] = cur
                 }
 
                 let teamDisplay = bucketObj.optString("display", "displayName", "display_name", defaultValue: slice.seed.display)
                 if tTotal > 0 || slice.seed.canonicalCode != "unknown" {
-                    let rate = tTotal > 0 ? min(100.0, Double(tOn) * 100.0 / Double(tTotal)) : 0.0
+                    let safeOn = tOn ?? 0
+                    let safeOff = tOff ?? 0
+                    let rate = (tOn != nil && tTotal > 0) ? min(100.0, Double(safeOn) * 100.0 / Double(tTotal)) : 0.0
                     if tTotal > 0 {
                         managerRows.append(
                             PersonPerformanceRow(
@@ -1393,8 +1802,8 @@ public final class WorkReportsAndReportingService {
                                 code: slice.seed.canonicalCode,
                                 name: teamDisplay,
                                 totalCount: tTotal,
-                                activeCount: min(tTotal, tOn),
-                                inactiveCount: min(tTotal, tOff),
+                                activeCount: min(tTotal, safeOn),
+                                inactiveCount: min(tTotal, safeOff),
                                 activeRatePct: rate
                             )
                         )
@@ -1409,9 +1818,9 @@ public final class WorkReportsAndReportingService {
                                 leaderName: "",
                                 memberCount: teamMembers.count,
                                 totalWorkers: tTotal,
-                                activeWorkers: min(tTotal, tOn),
-                                inactiveWorkers: min(tTotal, tOff),
-                                newWorkers: tTotal,
+                                activeWorkers: min(tTotal, safeOn),
+                                inactiveWorkers: min(tTotal, safeOff),
+                                newWorkers: 0,
                                 activeRatePct: rate,
                                 members: teamMembers
                             )
@@ -1420,36 +1829,39 @@ public final class WorkReportsAndReportingService {
                 }
             }
 
-            let sortedProjects = projectMap.values
+            let sortedProjectEntries = projectMap.values
                 .filter { $0.totalCount > 0 }
                 .sorted { $0.totalCount != $1.totalCount ? $0.totalCount > $1.totalCount : $0.display < $1.display }
-                .enumerated()
-                .map { idx, b in
-                    ProjectBreakdownRow(
-                        id: b.key.isEmpty ? "proj_\(idx)" : b.key,
-                        projectName: b.display,
-                        totalCount: b.totalCount,
-                        activeCount: b.onCount,
-                        inactiveCount: b.offCount,
-                        newCount: b.totalCount,
-                        activeSharePct: b.totalCount > 0 ? (Double(b.onCount) * 100.0 / Double(b.totalCount)) : 0.0
-                    )
-                }
+            let sortedProjects = sortedProjectEntries.enumerated().map { idx, b in
+                let pOn = b.onCount ?? 0
+                let pOff = b.offCount ?? 0
+                return ProjectBreakdownRow(
+                    id: b.key.isEmpty ? "proj_\(idx)" : b.key,
+                    projectName: b.display,
+                    totalCount: b.totalCount,
+                    activeCount: pOn,
+                    inactiveCount: pOff,
+                    newCount: 0,
+                    activeSharePct: (b.onCount != nil && b.totalCount > 0) ? (Double(pOn) * 100.0 / Double(b.totalCount)) : 0.0
+                )
+            }
 
-            let sortedRecruiters = recruiterMap.values
+            let sortedRecruiterEntries = recruiterMap.values
                 .filter { $0.totalCount > 0 }
                 .sorted { $0.totalCount != $1.totalCount ? $0.totalCount > $1.totalCount : $0.display < $1.display }
-                .map { b in
-                    PersonPerformanceRow(
-                        id: b.key,
-                        code: b.key,
-                        name: b.display,
-                        totalCount: b.totalCount,
-                        activeCount: b.onCount,
-                        inactiveCount: b.offCount,
-                        activeRatePct: b.totalCount > 0 ? (Double(b.onCount) * 100.0 / Double(b.totalCount)) : 0.0
-                    )
-                }
+            let sortedRecruiters = sortedRecruiterEntries.map { b in
+                let rOn = b.onCount ?? 0
+                let rOff = b.offCount ?? 0
+                return PersonPerformanceRow(
+                    id: b.key,
+                    code: b.key,
+                    name: b.display,
+                    totalCount: b.totalCount,
+                    activeCount: rOn,
+                    inactiveCount: rOff,
+                    activeRatePct: (b.onCount != nil && b.totalCount > 0) ? (Double(rOn) * 100.0 / Double(b.totalCount)) : 0.0
+                )
+            }
 
             managerRows.sort { $0.totalCount > $1.totalCount }
             teamRows.sort { $0.totalWorkers > $1.totalWorkers }
@@ -1466,17 +1878,35 @@ public final class WorkReportsAndReportingService {
                     )
                 }
 
-            let providerBuckets = providerMap.values
+            let sortedProviderEntries = providerMap.values
                 .filter { $0.totalCount > 0 }
                 .sorted { $0.totalCount > $1.totalCount }
-                .map { b in
-                    DistributionBucket(
-                        id: b.key,
-                        label: b.display,
-                        count: b.totalCount,
-                        percentage: Double(b.totalCount) * 100.0 / Double(safeTotal)
-                    )
-                }
+            let providerBuckets = sortedProviderEntries.map { b in
+                DistributionBucket(
+                    id: b.key,
+                    label: b.display,
+                    count: b.totalCount,
+                    percentage: Double(b.totalCount) * 100.0 / Double(safeTotal)
+                )
+            }
+
+            let byRecruiterItems = Self.buildBiBucketItems(
+                from: sortedRecruiterEntries.map { ($0.key, $0.display, $0.totalCount, $0.onCount, $0.offCount, $0.unconfirmedCount) },
+                totalDenominator: totalWorkers
+            )
+            let byProjectItems = Self.buildBiBucketItems(
+                from: sortedProjectEntries.map { ($0.key, $0.display, $0.totalCount, $0.onCount, $0.offCount, $0.unconfirmedCount) },
+                totalDenominator: totalWorkers
+            )
+            let byTeamItems = Self.buildBiBucketItems(
+                from: teamDistRaw.map { ($0.key, $0.label, $0.count, nil, nil, nil) },
+                totalDenominator: totalWorkers
+            )
+            let byProviderItems = Self.buildBiBucketItems(
+                from: sortedProviderEntries.map { ($0.key, $0.display, $0.totalCount, $0.onCount, $0.offCount, $0.unconfirmedCount) },
+                totalDenominator: totalWorkers
+            )
+            let hiringSummary = WorkReportsContract.computeHiringDaySummary(byDateCounts: combinedByDate)
 
             return PeriodAllScopeAggregation(
                 totalWorkers: totalWorkers,
@@ -1488,9 +1918,1304 @@ public final class WorkReportsAndReportingService {
                 managers: managerRows,
                 teamBuckets: teamBuckets,
                 providerBuckets: providerBuckets,
-                teams: teamRows
+                teams: teamRows,
+                byRecruiterItems: byRecruiterItems,
+                byProjectItems: byProjectItems,
+                byTeamItems: byTeamItems,
+                byProviderItems: byProviderItems,
+                hiringSummary: hiringSummary
             )
         }
+    }
+
+    public static func parseTeamDrillDownRows(
+        from detailObj: [String: Any],
+        fallbackReport: [String: Any] = [:]
+    ) -> [TeamDrillDownItem] {
+        let rawList = detailObj.optObjectArray("rows", "items")
+            .ifEmpty(fallbackReport.optObjectArray("rows", "items"))
+        return rawList.enumerated().map { idx, obj in
+            let businessDate = WorkReportsContract.normalizeDateIso(
+                obj.optString("businessDate", "business_date", "date", "report_date", "firstWorkDate", "first_work_date")
+            )
+            let firstWorkDate = WorkReportsContract.normalizeDateIso(
+                obj.optString("firstWorkDate", "first_work_date", "ngay_vao_lam", defaultValue: businessDate)
+            )
+            let projectObj = obj["project"] as? [String: Any]
+            let projectDisplay = projectObj?.optString("display", "display_name", "name")
+                ?? obj.optString("projectDisplay", "project_display", "du_an", "project_name", "project", defaultValue: "Chưa phân dự án")
+            let recruiterObj = obj["recruiter"] as? [String: Any]
+            let recruiterDisplay = recruiterObj?.optString("display", "display_name", "name")
+                ?? obj.optString("recruiterDisplay", "recruiter_display", "nguoi_tuyen", "recruiter_name", "recruiter", defaultValue: "Chưa gán người tuyển")
+            let rawProvider = obj.optString("providerTypeDisplay", "provider_type_display", "providerType", "provider_type", "provider", defaultValue: "HRP")
+            let providerDisplay: String = {
+                switch rawProvider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                case "hrp", "nội bộ hrp":
+                    return "Nội bộ HRP"
+                case "vendor":
+                    return "Vendor"
+                default:
+                    return rawProvider.isEmpty ? "Nội bộ HRP" : rawProvider
+                }
+            }()
+            let rawEmp = obj.optString("employmentTypeDisplay", "employment_type_display", "employmentType", "employment_type", "labor_type_display", "labor_type", defaultValue: "Thời vụ")
+            let empDisplay: String = {
+                switch rawEmp.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                case "thoi_vu", "seasonal", "thời vụ":
+                    return "Thời vụ"
+                case "chinh_thuc", "official", "chính thức":
+                    return "Chính thức"
+                default:
+                    return rawEmp.isEmpty ? "Thời vụ" : rawEmp
+                }
+            }()
+            let count = max(1, obj.optInt("recruitedCount", "recruited_count", "count", "total", defaultValue: 1))
+            let rowId = obj.optString("id", "row_id", defaultValue: "\(businessDate)_\(projectDisplay)_\(recruiterDisplay)_\(idx)")
+            return TeamDrillDownItem(
+                id: rowId,
+                businessDate: businessDate,
+                projectDisplay: projectDisplay,
+                recruiterDisplay: recruiterDisplay,
+                providerTypeDisplay: providerDisplay,
+                employmentTypeDisplay: empDisplay,
+                recruitedCount: count,
+                firstWorkDate: firstWorkDate
+            )
+        }
+    }
+
+    public static func parseTeamReportSnapshot(
+        from root: [String: Any],
+        requestedBucketKey: String,
+        knownBucketHint: BiBucketItem? = nil,
+        isPeriodFiltered: Bool = false
+    ) -> TeamReportSnapshot {
+        let dataObj = (root["data"] as? [String: Any]) ?? root
+        let repObj = (root["report"] as? [String: Any])
+            ?? (dataObj["report"] as? [String: Any])
+            ?? dataObj
+        let bucketObj = (root["bucket"] as? [String: Any])
+            ?? (dataObj["bucket"] as? [String: Any])
+            ?? (repObj["team"] as? [String: Any])
+            ?? [:]
+        let detailObj = (root["detail"] as? [String: Any])
+            ?? (dataObj["detail"] as? [String: Any])
+            ?? [:]
+        let wfObj = (root["workforce"] as? [String: Any])
+            ?? (dataObj["workforce"] as? [String: Any])
+            ?? [:]
+        let wfSnapObj = (wfObj["snapshot"] as? [String: Any])
+            ?? (repObj["summary"] as? [String: Any])
+            ?? [:]
+
+        let resolvedBucketKey = bucketObj.optString(
+            "key",
+            "bucketKey",
+            "bucket_key",
+            defaultValue: requestedBucketKey.isEmpty ? (knownBucketHint?.key ?? "unknown") : requestedBucketKey
+        )
+        let resolvedBucketDisplay: String = {
+            let fromBucket = bucketObj.optString("display", "displayName", "display_name", "name", "label")
+            if !fromBucket.isEmpty && fromBucket != resolvedBucketKey {
+                return fromBucket
+            }
+            if let hint = knownBucketHint?.display, !hint.isEmpty {
+                return hint
+            }
+            return !fromBucket.isEmpty ? fromBucket : defaultTeamDisplayName(for: resolvedBucketKey)
+        }()
+
+        let rows = parseTeamDrillDownRows(from: detailObj, fallbackReport: repObj)
+        let nextCursor: String? = {
+            let paginationObj = detailObj["pagination"] as? [String: Any]
+            if let hasMore = (detailObj.optNullableInt("has_more", "hasMore") != nil ? detailObj.optBool("has_more", "hasMore") : paginationObj?.optBool("has_more", "hasMore")),
+               hasMore == false {
+                return nil
+            }
+            let raw = detailObj.optNullableString("nextCursor", "next_cursor")
+                ?? paginationObj?.optNullableString("nextCursor", "next_cursor")
+                ?? repObj.optNullableString("nextCursor", "next_cursor")
+            guard let clean = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !clean.isEmpty else {
+                return nil
+            }
+            return clean
+        }()
+
+        let recEntries = parseReportingBucketEntries(from: repObj, keys: ["byRecruiter", "by_recruiter"])
+        let projEntries = parseReportingBucketEntries(from: repObj, keys: ["byProject", "by_project"])
+        let empEntries = parseReportingBucketEntries(
+            from: repObj,
+            keys: ["byEmployment", "by_employment", "byEmploymentType", "by_employment_type", "byLaborType", "by_labor_type"]
+        )
+        let provEntries = parseReportingBucketEntries(
+            from: repObj,
+            keys: ["byProvider", "by_provider", "byProviderType", "by_provider_type"]
+        )
+
+        let totalRecruited: Int = {
+            if let explicit = repObj.optNullableInt("recruitedTotal", "recruited_total", "total_recruited", "total") {
+                return explicit
+            }
+            if let dTotal = detailObj.optNullableInt("total", "totalCount", "total_count") {
+                return dTotal
+            }
+            if let sTotal = wfSnapObj.optNullableInt("eligible_episode_total", "eligibleEpisodeTotal", "total_count", "totalCount") {
+                return sTotal
+            }
+            if !recEntries.isEmpty {
+                return recEntries.reduce(0) { $0 + $1.totalCount }
+            }
+            if !projEntries.isEmpty {
+                return projEntries.reduce(0) { $0 + $1.totalCount }
+            }
+            if !rows.isEmpty {
+                return rows.reduce(0) { $0 + $1.recruitedCount }
+            }
+            return 0
+        }()
+
+        let byRecruiter = buildBiBucketItems(from: recEntries, totalDenominator: totalRecruited)
+        let byProject = buildBiBucketItems(from: projEntries, totalDenominator: totalRecruited)
+        let byEmployment = buildBiBucketItems(from: empEntries, totalDenominator: totalRecruited)
+        let byProvider = buildBiBucketItems(from: provEntries, totalDenominator: totalRecruited)
+
+        let activeRecruiterCount = repObj.optNullableInt("activeRecruiterCount", "active_recruiter_count")
+            ?? (!byRecruiter.isEmpty
+                ? byRecruiter.filter { $0.count > 0 }.count
+                : Set(rows.map(\.recruiterDisplay).filter { !$0.isEmpty }).count)
+        let activeProjectCount = repObj.optNullableInt("activeProjectCount", "active_project_count")
+            ?? (!byProject.isEmpty
+                ? byProject.filter { $0.count > 0 }.count
+                : Set(rows.map(\.projectDisplay).filter { !$0.isEmpty }).count)
+
+        let hiringSummary = WorkReportsContract.computeHiringDaySummary(fromReport: repObj, fallbackRows: rows)
+
+        // Strictly never default workingCount to totalRecruited!
+        let snapOn = wfSnapObj.optNullableInt("on_count", "onCount", "active_count")
+        let snapWait = wfSnapObj.optNullableInt("unconfirmed_count", "unconfirmedCount", "waiting_count")
+        let snapOff = wfSnapObj.optNullableInt("off_count", "offCount", "inactive_count")
+
+        let workingCount: Int? = isPeriodFiltered ? snapOn : (snapOn ?? knownBucketHint?.onCount)
+        let waitingCount: Int? = isPeriodFiltered ? snapWait : (snapWait ?? knownBucketHint?.unconfirmedCount)
+        let leftCount: Int? = isPeriodFiltered ? snapOff : (snapOff ?? knownBucketHint?.offCount)
+
+        return TeamReportSnapshot(
+            bucketKey: resolvedBucketKey,
+            bucketDisplay: resolvedBucketDisplay,
+            totalRecruited: totalRecruited,
+            rows: rows,
+            nextCursor: nextCursor,
+            activeRecruiterCount: activeRecruiterCount,
+            activeProjectCount: activeProjectCount,
+            activeHiringDays: hiringSummary.activeHiringDays,
+            avgPerActiveDay: hiringSummary.avgPerActiveDay,
+            peakDailyCount: hiringSummary.peakDailyCount,
+            peakDateIso: hiringSummary.peakDateIso,
+            workingCount: workingCount,
+            waitingCount: waitingCount,
+            leftCount: leftCount,
+            byRecruiter: byRecruiter,
+            byProject: byProject,
+            byEmployment: byEmployment,
+            byProvider: byProvider
+        )
+    }
+
+    public func fetchTeamReportSnapshot(
+        bucketKeyOrTeamCode: String,
+        knownBucketHint: BiBucketItem? = nil,
+        fromDate: String? = nil,
+        toDate: String? = nil,
+        limit: Int = 25,
+        canManageTeamCatalog: Bool = false
+    ) async -> MiniBiApiResult<TeamReportSnapshot> {
+        let cleanFrom = (fromDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanTo = (toDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let isPeriodFiltered = !cleanFrom.isEmpty || !cleanTo.isEmpty
+        let catalogMeta = await fetchAdminTeamCatalogMetadata(canManageTeamCatalog: canManageTeamCatalog)
+        let candidates = Self.candidateTeamCodes(
+            rawKey: bucketKeyOrTeamCode,
+            rawDisplay: knownBucketHint?.display ?? "",
+            dynamicMap: catalogMeta.map
+        )
+
+        var lastResponse: BackendHttpResponse?
+        var sawInvalidFilter = false
+
+        for candidate in candidates {
+            let encodedKey = Self.encodeTeamBucketKey(candidate)
+            var queryItems: [URLQueryItem] = [
+                URLQueryItem(name: "bucket_key", value: encodedKey),
+                URLQueryItem(name: "limit", value: String(max(1, limit)))
+            ]
+            if !cleanFrom.isEmpty {
+                queryItems.append(URLQueryItem(name: "from", value: cleanFrom))
+            }
+            if !cleanTo.isEmpty {
+                queryItems.append(URLQueryItem(name: "to", value: cleanTo))
+            }
+            let resp = await httpClient.request(
+                method: "GET",
+                path: "/api/reporting/team-report",
+                queryItems: queryItems
+            )
+            lastResponse = resp
+
+            if resp.isSuccess, let root = resp.jsonObject {
+                let dataObj = (root["data"] as? [String: Any]) ?? root
+                if root["report"] != nil || root["bucket"] != nil || root["detail"] != nil
+                    || dataObj["report"] != nil || dataObj["bucket"] != nil || dataObj["detail"] != nil
+                    || dataObj["byRecruiter"] != nil || dataObj["by_recruiter"] != nil
+                    || dataObj["byProject"] != nil || dataObj["by_project"] != nil
+                    || dataObj["summary"] != nil || dataObj["rows"] != nil {
+                    let snapshot = Self.parseTeamReportSnapshot(
+                        from: root,
+                        requestedBucketKey: bucketKeyOrTeamCode.isEmpty ? encodedKey : bucketKeyOrTeamCode,
+                        knownBucketHint: knownBucketHint,
+                        isPeriodFiltered: isPeriodFiltered
+                    )
+                    return .success(snapshot, statusCode: resp.statusCode)
+                }
+                if let hint = knownBucketHint {
+                    return .success(
+                        TeamReportSnapshot(
+                            bucketKey: hint.key,
+                            bucketDisplay: hint.display,
+                            totalRecruited: hint.count,
+                            rows: [],
+                            nextCursor: nil,
+                            activeRecruiterCount: 0,
+                            activeProjectCount: 0,
+                            activeHiringDays: 0,
+                            avgPerActiveDay: nil,
+                            peakDailyCount: nil,
+                            peakDateIso: nil,
+                            workingCount: isPeriodFiltered ? nil : hint.onCount,
+                            waitingCount: isPeriodFiltered ? nil : hint.unconfirmedCount,
+                            leftCount: isPeriodFiltered ? nil : hint.offCount
+                        ),
+                        statusCode: resp.statusCode
+                    )
+                }
+            }
+
+            if resp.statusCode == 400 {
+                sawInvalidFilter = true
+                continue
+            }
+            break
+        }
+
+        // Fallback when a valid team has 0 new recruits in the filtered period (Server returns 400 INVALID_FILTER when from/to is present)
+        if isPeriodFiltered && sawInvalidFilter {
+            let primaryCode = candidates.first ?? Self.decodeTeamBucketCode(bucketKeyOrTeamCode)
+            let encodedPrimary = Self.encodeTeamBucketKey(primaryCode)
+            var isVerifiedTeam = catalogMeta.verifiedCodes.contains(primaryCode.lowercased()) || knownBucketHint != nil
+            var probeDisplay = knownBucketHint?.display ?? ""
+
+            let probeResp = await httpClient.request(
+                method: "GET",
+                path: "/api/reporting/team-report",
+                queryItems: [
+                    URLQueryItem(name: "bucket_key", value: encodedPrimary),
+                    URLQueryItem(name: "limit", value: "1")
+                ]
+            )
+            if probeResp.isSuccess, let probeRoot = probeResp.jsonObject {
+                let probeData = (probeRoot["data"] as? [String: Any]) ?? probeRoot
+                if probeRoot["report"] != nil || probeRoot["bucket"] != nil || probeData["report"] != nil || probeData["bucket"] != nil {
+                    isVerifiedTeam = true
+                    let bObj = (probeRoot["bucket"] as? [String: Any]) ?? (probeData["bucket"] as? [String: Any]) ?? [:]
+                    let bDisp = bObj.optString("display", "displayName", "display_name", "name")
+                    if !bDisp.isEmpty {
+                        probeDisplay = bDisp
+                    }
+                }
+            }
+
+            if isVerifiedTeam {
+                let finalDisplay = !probeDisplay.isEmpty
+                    ? probeDisplay
+                    : Self.defaultTeamDisplayName(for: bucketKeyOrTeamCode.isEmpty ? primaryCode : bucketKeyOrTeamCode)
+                return .success(
+                    TeamReportSnapshot(
+                        bucketKey: bucketKeyOrTeamCode.isEmpty ? encodedPrimary : bucketKeyOrTeamCode,
+                        bucketDisplay: finalDisplay,
+                        totalRecruited: 0,
+                        rows: [],
+                        nextCursor: nil,
+                        activeRecruiterCount: 0,
+                        activeProjectCount: 0,
+                        activeHiringDays: 0,
+                        avgPerActiveDay: nil,
+                        peakDailyCount: nil,
+                        peakDateIso: nil,
+                        workingCount: nil,
+                        waitingCount: nil,
+                        leftCount: nil,
+                        byRecruiter: [],
+                        byProject: [],
+                        byEmployment: [],
+                        byProvider: []
+                    ),
+                    statusCode: 200
+                )
+            }
+        }
+
+        return .failure(
+            message: lastResponse?.errorMessage ?? "Không tải được báo cáo nhóm tuyển dụng.",
+            httpStatus: lastResponse?.statusCode ?? 0,
+            errorCode: lastResponse?.errorCode
+        )
+    }
+
+    public func fetchTeamDrillDownPage(
+        bucketKeyOrTeamCode: String,
+        cursor: String,
+        fromDate: String? = nil,
+        toDate: String? = nil,
+        limit: Int = 25,
+        canManageTeamCatalog: Bool = false
+    ) async -> MiniBiApiResult<(rows: [TeamDrillDownItem], nextCursor: String?)> {
+        let cleanCursor = cursor.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanCursor.isEmpty else {
+            return .success((rows: [], nextCursor: nil), statusCode: 200)
+        }
+        let cleanFrom = (fromDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanTo = (toDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let dynamicMap = await fetchAdminTeamCodeMap(canManageTeamCatalog: canManageTeamCatalog)
+        let candidates = Self.candidateTeamCodes(
+            rawKey: bucketKeyOrTeamCode,
+            dynamicMap: dynamicMap
+        )
+
+        var lastResponse: BackendHttpResponse?
+        for candidate in candidates {
+            let encodedKey = Self.encodeTeamBucketKey(candidate)
+            var queryItems: [URLQueryItem] = [
+                URLQueryItem(name: "bucket_key", value: encodedKey),
+                URLQueryItem(name: "cursor", value: cleanCursor),
+                URLQueryItem(name: "limit", value: String(max(1, limit)))
+            ]
+            if !cleanFrom.isEmpty {
+                queryItems.append(URLQueryItem(name: "from", value: cleanFrom))
+            }
+            if !cleanTo.isEmpty {
+                queryItems.append(URLQueryItem(name: "to", value: cleanTo))
+            }
+            let resp = await httpClient.request(
+                method: "GET",
+                path: "/api/reporting/team-drill-down",
+                queryItems: queryItems
+            )
+            lastResponse = resp
+
+            if resp.isSuccess, let root = resp.jsonObject {
+                let dataObj = (root["data"] as? [String: Any]) ?? root
+                let detailObj = (root["detail"] as? [String: Any])
+                    ?? (dataObj["detail"] as? [String: Any])
+                    ?? dataObj
+                let rows = Self.parseTeamDrillDownRows(from: detailObj, fallbackReport: dataObj)
+                let paginationObj = (detailObj["pagination"] as? [String: Any])
+                    ?? (dataObj["pagination"] as? [String: Any])
+                let nextCursor: String? = {
+                    if let hasMore = (detailObj.optNullableInt("has_more", "hasMore") != nil ? detailObj.optBool("has_more", "hasMore") : paginationObj?.optBool("has_more", "hasMore")),
+                       hasMore == false {
+                        return nil
+                    }
+                    let raw = detailObj.optNullableString("nextCursor", "next_cursor")
+                        ?? paginationObj?.optNullableString("nextCursor", "next_cursor")
+                        ?? dataObj.optNullableString("nextCursor", "next_cursor")
+                    guard let clean = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !clean.isEmpty else {
+                        return nil
+                    }
+                    return clean
+                }()
+                return .success((rows: rows, nextCursor: nextCursor), statusCode: resp.statusCode)
+            }
+
+            if resp.statusCode == 400 {
+                continue
+            }
+            break
+        }
+
+        return .failure(
+            message: lastResponse?.errorMessage ?? "Không tải được trang tiếp theo của chi tiết nhóm.",
+            httpStatus: lastResponse?.statusCode ?? 0,
+            errorCode: lastResponse?.errorCode
+        )
+    }
+
+    public static func classifyWorkerEmploymentStatus(_ worker: WorkerItem) -> String {
+        let code = worker.employmentStatusCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if code == "OFF" { return "OFF" }
+        if code == "UNCONFIRMED" { return "UNCONFIRMED" }
+        let st = worker.trangThai.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if st.contains("nghỉ") || st == "off" { return "OFF" }
+        if st.contains("chưa") || st.contains("chờ") || st == "unconfirmed" { return "UNCONFIRMED" }
+        return "ON"
+    }
+
+    public static func buildTeamReportFromWorkerRows(
+        workers: [WorkerItem],
+        bucketKey: String,
+        bucketDisplay: String,
+        isPeriodFiltered: Bool = false
+    ) -> TeamReportSnapshot {
+        let total = workers.count
+        var working = 0
+        var waiting = 0
+        var left = 0
+
+        var recMap: [String: (display: String, count: Int, on: Int, wait: Int, off: Int)] = [:]
+        var projMap: [String: (display: String, count: Int, on: Int, wait: Int, off: Int)] = [:]
+        var empMap: [String: (display: String, count: Int, on: Int, wait: Int, off: Int)] = [:]
+        var provMap: [String: (display: String, count: Int, on: Int, wait: Int, off: Int)] = [:]
+        var drillMap: [String: TeamDrillDownItem] = [:]
+
+        for w in workers {
+            let st = classifyWorkerEmploymentStatus(w)
+            let isOn = st == "ON" ? 1 : 0
+            let isWait = st == "UNCONFIRMED" ? 1 : 0
+            let isOff = st == "OFF" ? 1 : 0
+            working += isOn
+            waiting += isWait
+            left += isOff
+
+            let recName = w.nguoiTuyen.trimmingCharacters(in: .whitespacesAndNewlines).ifEmpty("Chưa gán người tuyển")
+            let recKey = w.recruiterId.trimmingCharacters(in: .whitespacesAndNewlines).ifEmpty(recName).lowercased()
+            var rCur = recMap[recKey] ?? (recName, 0, 0, 0, 0)
+            rCur.count += 1; rCur.on += isOn; rCur.wait += isWait; rCur.off += isOff
+            recMap[recKey] = rCur
+
+            let projName = w.duAn.trimmingCharacters(in: .whitespacesAndNewlines).ifEmpty("Chưa phân dự án")
+            let projKey = w.projectId.trimmingCharacters(in: .whitespacesAndNewlines).ifEmpty(projName).lowercased()
+            var pCur = projMap[projKey] ?? (projName, 0, 0, 0, 0)
+            pCur.count += 1; pCur.on += isOn; pCur.wait += isWait; pCur.off += isOff
+            projMap[projKey] = pCur
+
+            let empName = normalizeBucketDisplay(rawDisplay: w.nganhNghe, fallbackKey: "Thời vụ")
+            let empKey = empName.lowercased()
+            var eCur = empMap[empKey] ?? (empName, 0, 0, 0, 0)
+            eCur.count += 1; eCur.on += isOn; eCur.wait += isWait; eCur.off += isOff
+            empMap[empKey] = eCur
+
+            let provName = w.providerType.lowercased() == "vendor" ? "Vendor" : "Nội bộ HRP"
+            let provKey = provName.lowercased()
+            var prCur = provMap[provKey] ?? (provName, 0, 0, 0, 0)
+            prCur.count += 1; prCur.on += isOn; prCur.wait += isWait; prCur.off += isOff
+            provMap[provKey] = prCur
+
+            let dateIso = WorkReportsContract.normalizeDateIso(w.ngayVaoLam)
+            let drillKey = "\(dateIso)|\(projKey)|\(recKey)|\(provKey)|\(empKey)"
+            if let existing = drillMap[drillKey] {
+                drillMap[drillKey] = TeamDrillDownItem(
+                    id: existing.id,
+                    businessDate: existing.businessDate,
+                    projectDisplay: existing.projectDisplay,
+                    recruiterDisplay: existing.recruiterDisplay,
+                    providerTypeDisplay: existing.providerTypeDisplay,
+                    employmentTypeDisplay: existing.employmentTypeDisplay,
+                    recruitedCount: existing.recruitedCount + 1,
+                    firstWorkDate: existing.firstWorkDate
+                )
+            } else {
+                drillMap[drillKey] = TeamDrillDownItem(
+                    id: drillKey,
+                    businessDate: dateIso,
+                    projectDisplay: projName,
+                    recruiterDisplay: recName,
+                    providerTypeDisplay: provName,
+                    employmentTypeDisplay: empName,
+                    recruitedCount: 1,
+                    firstWorkDate: dateIso
+                )
+            }
+        }
+
+        let byRecruiter = buildBiBucketItems(
+            from: recMap.map { ($0.key, $0.value.display, $0.value.count, $0.value.on, $0.value.off, $0.value.wait) },
+            totalDenominator: total
+        )
+        let byProject = buildBiBucketItems(
+            from: projMap.map { ($0.key, $0.value.display, $0.value.count, $0.value.on, $0.value.off, $0.value.wait) },
+            totalDenominator: total
+        )
+        let byEmployment = buildBiBucketItems(
+            from: empMap.map { ($0.key, $0.value.display, $0.value.count, $0.value.on, $0.value.off, $0.value.wait) },
+            totalDenominator: total
+        )
+        let byProvider = buildBiBucketItems(
+            from: provMap.map { ($0.key, $0.value.display, $0.value.count, $0.value.on, $0.value.off, $0.value.wait) },
+            totalDenominator: total
+        )
+        let sortedRows = drillMap.values.sorted { lhs, rhs in
+            if lhs.businessDate != rhs.businessDate { return lhs.businessDate > rhs.businessDate }
+            if lhs.recruitedCount != rhs.recruitedCount { return lhs.recruitedCount > rhs.recruitedCount }
+            return lhs.projectDisplay < rhs.projectDisplay
+        }
+        let hiringSummary = WorkReportsContract.computeHiringDaySummary(fromWorkers: workers)
+
+        return TeamReportSnapshot(
+            bucketKey: bucketKey,
+            bucketDisplay: bucketDisplay,
+            totalRecruited: total,
+            rows: sortedRows,
+            nextCursor: nil,
+            activeRecruiterCount: byRecruiter.filter { $0.count > 0 }.count,
+            activeProjectCount: byProject.filter { $0.count > 0 }.count,
+            activeHiringDays: hiringSummary.activeHiringDays,
+            avgPerActiveDay: hiringSummary.avgPerActiveDay,
+            peakDailyCount: hiringSummary.peakDailyCount,
+            peakDateIso: hiringSummary.peakDateIso,
+            workingCount: working,
+            waitingCount: waiting,
+            leftCount: left,
+            byRecruiter: byRecruiter,
+            byProject: byProject,
+            byEmployment: byEmployment,
+            byProvider: byProvider
+        )
+    }
+
+    public static func buildGeneralOverviewSnapshotFromWorkers(
+        workers: [WorkerItem],
+        audienceKind: String,
+        scopeDescription: String,
+        isPeriodFiltered: Bool,
+        periodFromDate: String?,
+        periodToDate: String?,
+        managedTotal: Int? = nil,
+        recruitedTotal: Int? = nil,
+        teamTotal: Int? = nil
+    ) -> GeneralOverviewSnapshot {
+        let total = workers.count
+        var working = 0
+        var waiting = 0
+        var left = 0
+
+        var recMap: [String: (display: String, count: Int, on: Int, wait: Int, off: Int)] = [:]
+        var projMap: [String: (display: String, count: Int, on: Int, wait: Int, off: Int)] = [:]
+        var empMap: [String: (display: String, count: Int, on: Int, wait: Int, off: Int)] = [:]
+        var provMap: [String: (display: String, count: Int, on: Int, wait: Int, off: Int)] = [:]
+
+        for w in workers {
+            let st = classifyWorkerEmploymentStatus(w)
+            let isOn = st == "ON" ? 1 : 0
+            let isWait = st == "UNCONFIRMED" ? 1 : 0
+            let isOff = st == "OFF" ? 1 : 0
+            working += isOn
+            waiting += isWait
+            left += isOff
+
+            let recName = w.nguoiTuyen.trimmingCharacters(in: .whitespacesAndNewlines).ifEmpty("Chưa gán người tuyển")
+            let recKey = w.recruiterId.trimmingCharacters(in: .whitespacesAndNewlines).ifEmpty(recName).lowercased()
+            var rCur = recMap[recKey] ?? (recName, 0, 0, 0, 0)
+            rCur.count += 1; rCur.on += isOn; rCur.wait += isWait; rCur.off += isOff
+            recMap[recKey] = rCur
+
+            let projName = w.duAn.trimmingCharacters(in: .whitespacesAndNewlines).ifEmpty("Chưa phân dự án")
+            let projKey = w.projectId.trimmingCharacters(in: .whitespacesAndNewlines).ifEmpty(projName).lowercased()
+            var pCur = projMap[projKey] ?? (projName, 0, 0, 0, 0)
+            pCur.count += 1; pCur.on += isOn; pCur.wait += isWait; pCur.off += isOff
+            projMap[projKey] = pCur
+
+            let empName = normalizeBucketDisplay(rawDisplay: w.nganhNghe, fallbackKey: "Thời vụ")
+            let empKey = empName.lowercased()
+            var eCur = empMap[empKey] ?? (empName, 0, 0, 0, 0)
+            eCur.count += 1; eCur.on += isOn; eCur.wait += isWait; eCur.off += isOff
+            empMap[empKey] = eCur
+
+            let provName = w.providerType.lowercased() == "vendor" ? "Vendor" : "Nội bộ HRP"
+            let provKey = provName.lowercased()
+            var prCur = provMap[provKey] ?? (provName, 0, 0, 0, 0)
+            prCur.count += 1; prCur.on += isOn; prCur.wait += isWait; prCur.off += isOff
+            provMap[provKey] = prCur
+        }
+
+        let byRecruiter = buildBiBucketItems(
+            from: recMap.map { ($0.key, $0.value.display, $0.value.count, $0.value.on, $0.value.off, $0.value.wait) },
+            totalDenominator: total
+        )
+        let byProject = buildBiBucketItems(
+            from: projMap.map { ($0.key, $0.value.display, $0.value.count, $0.value.on, $0.value.off, $0.value.wait) },
+            totalDenominator: total
+        )
+        let byEmployment = buildBiBucketItems(
+            from: empMap.map { ($0.key, $0.value.display, $0.value.count, $0.value.on, $0.value.off, $0.value.wait) },
+            totalDenominator: total
+        )
+        let byProvider = buildBiBucketItems(
+            from: provMap.map { ($0.key, $0.value.display, $0.value.count, $0.value.on, $0.value.off, $0.value.wait) },
+            totalDenominator: total
+        )
+        let hiringSummary = WorkReportsContract.computeHiringDaySummary(fromWorkers: workers)
+        let workingRatePct: Double? = total > 0 ? (Double(working) * 100.0 / Double(total)) : nil
+        let placementRatePct: Double? = total > 0 ? (Double(working + left) * 100.0 / Double(total)) : nil
+
+        return GeneralOverviewSnapshot(
+            asOfDate: "",
+            scopeDescription: scopeDescription,
+            totalProfiles: total,
+            workingCount: working,
+            waitingCount: waiting,
+            leftCount: left,
+            audienceKind: audienceKind,
+            isPeriodFiltered: isPeriodFiltered,
+            workingRatePct: workingRatePct,
+            placementRatePct: placementRatePct,
+            retention7dPct: nil,
+            retention30dPct: nil,
+            closingTotalProfiles: nil,
+            closingWorkingCount: nil,
+            closingWaitingCount: nil,
+            closingLeftCount: nil,
+            projectCount: byProject.count,
+            recruiterCount: byRecruiter.count,
+            managedTotal: managedTotal,
+            recruitedTotal: recruitedTotal,
+            teamTotal: teamTotal,
+            activeHiringDays: hiringSummary.activeHiringDays,
+            avgPerActiveDay: hiringSummary.avgPerActiveDay,
+            peakDailyCount: hiringSummary.peakDailyCount,
+            peakDateIso: hiringSummary.peakDateIso,
+            leadingProject: byProject.first,
+            byRecruiter: byRecruiter,
+            byProject: byProject,
+            bySecondaryGroup: byEmployment,
+            secondaryGroupTitle: "Cơ cấu theo loại hình lao động",
+            byProvider: byProvider,
+            periodFromDate: isPeriodFiltered ? periodFromDate : nil,
+            periodToDate: isPeriodFiltered ? periodToDate : nil,
+            periodNewEpisodes: isPeriodFiltered ? total : nil,
+            periodOnInflow: isPeriodFiltered ? working : nil,
+            periodOffInflow: isPeriodFiltered ? left : nil,
+            periodNetOnChange: isPeriodFiltered ? (working - left) : nil
+        )
+    }
+
+    public func fetchWorkforceDeepDashboard(
+        startDate: String? = nil,
+        endDate: String? = nil,
+        canManageTeamCatalog: Bool = false
+    ) async -> MiniBiApiResult<(
+        snapshot: GeneralOverviewSnapshot,
+        teamOptions: [BiBucketItem],
+        legacyOverview: GeneralOverviewData,
+        legacyTeamReport: TeamReportData
+    )> {
+        let cleanStart = (startDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanEnd = (endDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasDateFilter = !cleanStart.isEmpty || !cleanEnd.isEmpty
+
+        let response = await fetchCoalescedWorkforceDeepResponse(
+            startDate: cleanStart,
+            endDate: cleanEnd
+        )
+        guard response.isSuccess, let root = response.jsonObject else {
+            return .failure(
+                message: response.errorMessage ?? "Không thể tải báo cáo tổng quát.",
+                httpStatus: response.statusCode,
+                errorCode: response.errorCode
+            )
+        }
+
+        if let wfObj = root["workforce"] as? [String: Any] {
+            let snapshotObj = (wfObj["snapshot"] as? [String: Any]) ?? [:]
+            let balanceObj = (wfObj["balance"] as? [String: Any]) ?? [:]
+            let balanceApplicable = balanceObj.optBool("applicable", defaultValue: false)
+            let newEpObj = (balanceObj["new_episodes_in_period"] as? [String: Any])
+                ?? (balanceObj["newEpisodesInPeriod"] as? [String: Any]) ?? [:]
+            let byStatusObj = (balanceObj["by_status"] as? [String: Any])
+                ?? (balanceObj["byStatus"] as? [String: Any]) ?? [:]
+            let onFlowObj = (byStatusObj["on"] as? [String: Any]) ?? [:]
+            let offFlowObj = (byStatusObj["off"] as? [String: Any]) ?? [:]
+            let waitingFlowObj = (byStatusObj["unconfirmed"] as? [String: Any]) ?? [:]
+            let retentionObj = (wfObj["retention"] as? [String: Any]) ?? [:]
+            let checkpointsObj = (retentionObj["checkpoints"] as? [String: Any]) ?? [:]
+            let d30Obj = (checkpointsObj["d30"] as? [String: Any]) ?? [:]
+            let d7Obj = (checkpointsObj["d7"] as? [String: Any]) ?? [:]
+            let periodCohortObj = (retentionObj["period_cohort"] as? [String: Any])
+                ?? (retentionObj["periodCohort"] as? [String: Any]) ?? [:]
+            let periodCpObj = (periodCohortObj["checkpoints"] as? [String: Any]) ?? [:]
+            let periodD7Obj = (periodCpObj["d7"] as? [String: Any]) ?? [:]
+
+            let snapshotTotal = snapshotObj.optInt("eligible_episode_total", "eligibleEpisodeTotal", "total")
+            let snapshotOn = snapshotObj.optInt("on_count", "onCount", "active_count")
+            let snapshotOff = snapshotObj.optInt("off_count", "offCount", "inactive_count")
+            let snapshotUnconfirmed = snapshotObj.optInt("unconfirmed_count", "unconfirmedCount", "interview_count")
+            let asOfDate = wfObj.optString(
+                "as_of_date",
+                "asOfDate",
+                defaultValue: snapshotObj.optString("as_of_date", "asOfDate", defaultValue: root.optString("as_of_date", "asOfDate"))
+            )
+
+            let d7RatePct: Double? = {
+                if let r = d7Obj.optNullableDouble("retention_rate", "retentionRate") {
+                    return r <= 1.0 && r > 0.0 ? r * 100.0 : r
+                }
+                return nil
+            }()
+            let d30RatePct: Double? = {
+                if let r = d30Obj.optNullableDouble("retention_rate", "retentionRate") {
+                    return r <= 1.0 && r > 0.0 ? r * 100.0 : r
+                }
+                return nil
+            }()
+            let periodD7RatePct: Double? = {
+                if let r = periodD7Obj.optNullableDouble("retention_rate", "retentionRate") {
+                    return r <= 1.0 && r > 0.0 ? r * 100.0 : r
+                }
+                return nil
+            }()
+
+            let dimsObj = (wfObj["dimensions"] as? [String: Any]) ?? [:]
+            let byTeamObj = (dimsObj["by_team"] as? [String: Any])
+                ?? (dimsObj["byTeam"] as? [String: Any]) ?? [:]
+            let teamBucketsRaw = byTeamObj.optObjectArray("buckets")
+
+            let byProjectObj = (dimsObj["by_project"] as? [String: Any])
+                ?? (dimsObj["byProject"] as? [String: Any]) ?? [:]
+            let projectsBucketsRaw = byProjectObj.optObjectArray("buckets")
+            let projectPaginationObj = (byProjectObj["pagination"] as? [String: Any]) ?? [:]
+            let totalProjectCountDim = max(
+                projectPaginationObj.optInt("total_count", "totalCount"),
+                projectsBucketsRaw.count
+            )
+
+            let byRecruiterObj = (dimsObj["by_recruiter"] as? [String: Any])
+                ?? (dimsObj["byRecruiter"] as? [String: Any]) ?? [:]
+            let recruitersBucketsRaw = byRecruiterObj.optObjectArray("buckets")
+            let recruiterPaginationObj = (byRecruiterObj["pagination"] as? [String: Any]) ?? [:]
+            let totalRecruiterCountDim = max(
+                recruiterPaginationObj.optInt("total_count", "totalCount"),
+                recruitersBucketsRaw.count
+            )
+
+            let byProviderObj = (dimsObj["by_provider"] as? [String: Any])
+                ?? (dimsObj["byProvider"] as? [String: Any]) ?? [:]
+            let providerBucketsRaw = byProviderObj.optObjectArray("buckets")
+
+            func parseDimBuckets(_ arr: [[String: Any]], fallbackPrefix: String, denom: Int) -> [BiBucketItem] {
+                let entries = arr.enumerated().compactMap { idx, obj -> (key: String, display: String, totalCount: Int, onCount: Int?, offCount: Int?, unconfirmedCount: Int?)? in
+                    let count = obj.optInt("eligible_episode_count", "eligibleEpisodeCount", "recruitedCount", "recruited_count", "total_workers", "total", "count")
+                    let key = obj.optString("key", "id", "code", "project_id", "recruiter_id", "team_id", defaultValue: "\(fallbackPrefix)_\(idx)")
+                    let display = Self.normalizeBucketDisplay(
+                        rawDisplay: obj.optString("display", "displayName", "display_name", "project_display", "recruiter_display", "team_display", "label", "name", defaultValue: key),
+                        fallbackKey: key
+                    )
+                    let onCnt = obj.optNullableInt("on_count", "onCount", "active_count")
+                    let offCnt = obj.optNullableInt("off_count", "offCount", "inactive_count")
+                    let unconfCnt = obj.optNullableInt("unconfirmed_count", "unconfirmedCount")
+                    return (key, display, count, onCnt, offCnt, unconfCnt)
+                }
+                return Self.buildBiBucketItems(from: entries, totalDenominator: denom)
+            }
+
+            let normalizedTeams = parseDimBuckets(teamBucketsRaw, fallbackPrefix: "team", denom: snapshotTotal)
+            let byProjectDim = parseDimBuckets(projectsBucketsRaw, fallbackPrefix: "proj", denom: snapshotTotal)
+            let byRecruiterDim = parseDimBuckets(recruitersBucketsRaw, fallbackPrefix: "rec", denom: snapshotTotal)
+            let byProviderDim = parseDimBuckets(providerBucketsRaw, fallbackPrefix: "prov", denom: snapshotTotal)
+
+            let periodAgg: PeriodAllScopeAggregation? = hasDateFilter
+                ? await fetchCoalescedPeriodAggregation(
+                    teamBucketsRaw: teamBucketsRaw,
+                    startDate: cleanStart,
+                    endDate: cleanEnd,
+                    canManageTeamCatalog: canManageTeamCatalog
+                )
+                : nil
+
+            let newCount = newEpObj.optInt("total", "count")
+            let onInflow = onFlowObj.optInt("total_inflow_count", "totalInflowCount", "count")
+            let offInflow = offFlowObj.optInt("total_inflow_count", "totalInflowCount", "count")
+            let waitingInflow = waitingFlowObj.optInt("total_inflow_count", "totalInflowCount", "count")
+            let netOnChange = onFlowObj.optNullableInt("net_change", "netChange") ?? (onInflow - offInflow)
+
+            let snapshot: GeneralOverviewSnapshot
+            let teamOptions: [BiBucketItem]
+
+            if hasDateFilter {
+                let totalProfiles: Int = {
+                    if let agg = periodAgg, agg.totalWorkers > 0 {
+                        return agg.totalWorkers
+                    }
+                    if balanceApplicable {
+                        return newCount
+                    }
+                    return snapshotTotal
+                }()
+                let workingCount = balanceApplicable ? onInflow : (periodAgg?.activeCount ?? snapshotOn)
+                let waitingCount = balanceApplicable ? waitingInflow : (periodAgg?.unconfirmedCount ?? snapshotUnconfirmed)
+                let leftCount = balanceApplicable ? offInflow : (periodAgg?.inactiveCount ?? snapshotOff)
+
+                let finalByRecruiter = (periodAgg?.byRecruiterItems.isEmpty == false) ? periodAgg!.byRecruiterItems : byRecruiterDim
+                let finalByProject = (periodAgg?.byProjectItems.isEmpty == false) ? periodAgg!.byProjectItems : byProjectDim
+                let finalByTeam = (periodAgg?.byTeamItems.isEmpty == false) ? periodAgg!.byTeamItems : normalizedTeams
+                let finalByProvider = (periodAgg?.byProviderItems.isEmpty == false) ? periodAgg!.byProviderItems : byProviderDim
+
+                if let agg = periodAgg, !agg.byTeamItems.isEmpty {
+                    var periodMap: [String: BiBucketItem] = [:]
+                    for item in agg.byTeamItems {
+                        periodMap[item.key.lowercased()] = item
+                    }
+                    var mergedOptions: [BiBucketItem] = []
+                    var seenKeys: Set<String> = []
+                    for baseTeam in normalizedTeams {
+                        let lk = baseTeam.key.lowercased()
+                        seenKeys.insert(lk)
+                        if let matched = periodMap[lk] {
+                            mergedOptions.append(matched)
+                        } else {
+                            mergedOptions.append(
+                                BiBucketItem(
+                                    key: baseTeam.key,
+                                    display: baseTeam.display,
+                                    count: 0,
+                                    sharePct: 0.0,
+                                    onCount: nil,
+                                    unconfirmedCount: nil,
+                                    offCount: nil
+                                )
+                            )
+                        }
+                    }
+                    for item in agg.byTeamItems where !seenKeys.contains(item.key.lowercased()) {
+                        mergedOptions.append(item)
+                    }
+                    teamOptions = mergedOptions
+                } else {
+                    teamOptions = normalizedTeams
+                }
+
+                snapshot = GeneralOverviewSnapshot(
+                    asOfDate: asOfDate,
+                    scopeDescription: "Toàn hệ thống",
+                    totalProfiles: totalProfiles,
+                    workingCount: workingCount,
+                    waitingCount: waitingCount,
+                    leftCount: leftCount,
+                    audienceKind: "all",
+                    isPeriodFiltered: true,
+                    workingRatePct: snapshotTotal > 0 ? (Double(snapshotOn) * 100.0 / Double(snapshotTotal)) : nil,
+                    placementRatePct: snapshotTotal > 0 ? (Double(snapshotOn + snapshotOff) * 100.0 / Double(snapshotTotal)) : nil,
+                    retention7dPct: periodD7RatePct ?? d7RatePct,
+                    retention30dPct: d30RatePct,
+                    closingTotalProfiles: snapshotTotal,
+                    closingWorkingCount: snapshotOn,
+                    closingWaitingCount: snapshotUnconfirmed,
+                    closingLeftCount: snapshotOff,
+                    projectCount: finalByProject.count,
+                    recruiterCount: finalByRecruiter.count,
+                    managedTotal: nil,
+                    recruitedTotal: nil,
+                    teamTotal: nil,
+                    activeHiringDays: periodAgg?.hiringSummary.activeHiringDays ?? 0,
+                    avgPerActiveDay: periodAgg?.hiringSummary.avgPerActiveDay,
+                    peakDailyCount: periodAgg?.hiringSummary.peakDailyCount,
+                    peakDateIso: periodAgg?.hiringSummary.peakDateIso,
+                    leadingProject: finalByProject.first,
+                    byRecruiter: finalByRecruiter,
+                    byProject: finalByProject,
+                    bySecondaryGroup: finalByTeam,
+                    secondaryGroupTitle: "Cơ cấu theo nhóm tuyển dụng",
+                    byProvider: finalByProvider,
+                    periodFromDate: cleanStart,
+                    periodToDate: cleanEnd,
+                    periodNewEpisodes: totalProfiles,
+                    periodOnInflow: workingCount,
+                    periodOffInflow: leftCount,
+                    periodNetOnChange: netOnChange
+                )
+            } else {
+                teamOptions = normalizedTeams
+                snapshot = GeneralOverviewSnapshot(
+                    asOfDate: asOfDate,
+                    scopeDescription: "Toàn hệ thống",
+                    totalProfiles: snapshotTotal,
+                    workingCount: snapshotOn,
+                    waitingCount: snapshotUnconfirmed,
+                    leftCount: snapshotOff,
+                    audienceKind: "all",
+                    isPeriodFiltered: false,
+                    workingRatePct: snapshotTotal > 0 ? (Double(snapshotOn) * 100.0 / Double(snapshotTotal)) : nil,
+                    placementRatePct: snapshotTotal > 0 ? (Double(snapshotOn + snapshotOff) * 100.0 / Double(snapshotTotal)) : nil,
+                    retention7dPct: d7RatePct,
+                    retention30dPct: d30RatePct,
+                    closingTotalProfiles: snapshotTotal,
+                    closingWorkingCount: snapshotOn,
+                    closingWaitingCount: snapshotUnconfirmed,
+                    closingLeftCount: snapshotOff,
+                    projectCount: max(totalProjectCountDim, byProjectDim.count),
+                    recruiterCount: max(totalRecruiterCountDim, byRecruiterDim.count),
+                    managedTotal: nil,
+                    recruitedTotal: nil,
+                    teamTotal: nil,
+                    activeHiringDays: 0,
+                    avgPerActiveDay: nil,
+                    peakDailyCount: nil,
+                    peakDateIso: nil,
+                    leadingProject: byProjectDim.first,
+                    byRecruiter: byRecruiterDim,
+                    byProject: byProjectDim,
+                    bySecondaryGroup: normalizedTeams,
+                    secondaryGroupTitle: "Cơ cấu theo nhóm tuyển dụng",
+                    byProvider: byProviderDim,
+                    periodFromDate: nil,
+                    periodToDate: nil,
+                    periodNewEpisodes: nil,
+                    periodOnInflow: nil,
+                    periodOffInflow: nil,
+                    periodNetOnChange: nil
+                )
+            }
+
+            let legacyProjects = snapshot.byProject.enumerated().map { idx, b in
+                ProjectBreakdownRow(
+                    id: b.key.isEmpty ? "proj_\(idx)" : b.key,
+                    projectName: b.display,
+                    totalCount: b.count,
+                    activeCount: b.onCount ?? 0,
+                    inactiveCount: b.offCount ?? 0,
+                    newCount: b.unconfirmedCount ?? 0,
+                    activeSharePct: b.sharePct
+                )
+            }
+            let legacyRecruiters = snapshot.byRecruiter.map { b in
+                PersonPerformanceRow(
+                    id: b.key,
+                    code: b.key,
+                    name: b.display,
+                    totalCount: b.count,
+                    activeCount: b.onCount ?? 0,
+                    inactiveCount: b.offCount ?? 0,
+                    activeRatePct: b.sharePct
+                )
+            }
+            let legacyManagers = snapshot.bySecondaryGroup.map { b in
+                PersonPerformanceRow(
+                    id: b.key,
+                    code: b.key,
+                    name: b.display,
+                    totalCount: b.count,
+                    activeCount: b.onCount ?? 0,
+                    inactiveCount: b.offCount ?? 0,
+                    activeRatePct: b.sharePct
+                )
+            }
+            let legacyOverview = GeneralOverviewData(
+                scope: "all",
+                kpis: GeneralOverviewKpis(
+                    totalHeadcount: snapshot.totalProfiles,
+                    activeCount: snapshot.workingCount,
+                    inactiveCount: snapshot.leftCount,
+                    interviewCount: snapshot.waitingCount,
+                    newCount: newCount,
+                    resignedInPeriodCount: offInflow,
+                    retentionRate: snapshot.retention30dPct ?? snapshot.workingRatePct ?? 0.0,
+                    turnoverRate: snapshot.totalProfiles > 0 ? (Double(snapshot.leftCount) * 100.0 / Double(snapshot.totalProfiles)) : 0.0
+                ),
+                projects: legacyProjects,
+                projectsTotal: snapshot.projectCount,
+                projectsPage: 1,
+                projectsTotalPages: 1,
+                recruiters: legacyRecruiters,
+                managers: legacyManagers
+            )
+            let legacyTeams: [TeamSummaryRow] = teamOptions.map { b in
+                TeamSummaryRow(
+                    id: b.key,
+                    teamCode: b.key,
+                    teamName: b.display,
+                    leaderName: "",
+                    memberCount: 0,
+                    totalWorkers: b.count,
+                    activeWorkers: b.onCount ?? 0,
+                    inactiveWorkers: b.offCount ?? 0,
+                    newWorkers: b.unconfirmedCount ?? 0,
+                    activeRatePct: b.sharePct,
+                    members: []
+                )
+            }
+
+            return .success(
+                (
+                    snapshot: snapshot,
+                    teamOptions: teamOptions,
+                    legacyOverview: legacyOverview,
+                    legacyTeamReport: TeamReportData(teams: legacyTeams)
+                ),
+                statusCode: response.statusCode
+            )
+        }
+
+        // Legacy fallback JSON format (`root["report"]` / `root["kpis"]`)
+        let reportObj = (root["report"] as? [String: Any])
+            ?? (root["data"] as? [String: Any])
+            ?? root
+        let kpisObj = (reportObj["kpis"] as? [String: Any])
+            ?? (reportObj["summary"] as? [String: Any])
+            ?? reportObj
+        let totalWorkers = kpisObj.optInt("total_workers", "total_headcount", "total")
+        let activeCount = kpisObj.optInt("on_count", "active_count", "working_count", "active")
+        let inactiveCount = kpisObj.optInt("off_count", "inactive_count", "resigned_count", "inactive")
+        let unconfirmedCount = kpisObj.optInt("unconfirmed_count", "interview_count", "interview")
+        let projEntries = Self.parseReportingBucketEntries(from: reportObj, keys: ["by_project", "projects"])
+        let recEntries = Self.parseReportingBucketEntries(from: reportObj, keys: ["by_recruiter", "recruiters"])
+        let byProject = Self.buildBiBucketItems(from: projEntries, totalDenominator: totalWorkers)
+        let byRecruiter = Self.buildBiBucketItems(from: recEntries, totalDenominator: totalWorkers)
+
+        let snapshot = GeneralOverviewSnapshot(
+            asOfDate: "",
+            scopeDescription: "Toàn hệ thống",
+            totalProfiles: totalWorkers,
+            workingCount: activeCount,
+            waitingCount: unconfirmedCount,
+            leftCount: inactiveCount,
+            audienceKind: "all",
+            isPeriodFiltered: hasDateFilter,
+            workingRatePct: totalWorkers > 0 ? (Double(activeCount) * 100.0 / Double(totalWorkers)) : nil,
+            placementRatePct: totalWorkers > 0 ? (Double(activeCount + inactiveCount) * 100.0 / Double(totalWorkers)) : nil,
+            projectCount: byProject.count,
+            recruiterCount: byRecruiter.count,
+            leadingProject: byProject.first,
+            byRecruiter: byRecruiter,
+            byProject: byProject,
+            bySecondaryGroup: [],
+            secondaryGroupTitle: "Cơ cấu theo nhóm tuyển dụng",
+            byProvider: [],
+            periodFromDate: hasDateFilter ? cleanStart : nil,
+            periodToDate: hasDateFilter ? cleanEnd : nil
+        )
+        let legacyOverview = GeneralOverviewData(
+            scope: "all",
+            kpis: GeneralOverviewKpis(
+                totalHeadcount: totalWorkers,
+                activeCount: activeCount,
+                inactiveCount: inactiveCount,
+                interviewCount: unconfirmedCount
+            )
+        )
+        return .success(
+            (
+                snapshot: snapshot,
+                teamOptions: [],
+                legacyOverview: legacyOverview,
+                legacyTeamReport: TeamReportData(teams: [])
+            ),
+            statusCode: response.statusCode
+        )
+    }
+
+    public func fetchScopedDashboardSnapshots(
+        user: MiniBiUser,
+        startDate: String? = nil,
+        endDate: String? = nil
+    ) async -> MiniBiApiResult<(
+        snapshot: GeneralOverviewSnapshot,
+        teamOptions: [BiBucketItem],
+        teamReportsByKey: [String: TeamReportSnapshot],
+        canViewTeamReport: Bool,
+        legacyOverview: GeneralOverviewData,
+        legacyTeamReport: TeamReportData
+    )> {
+        let allowedSet = Set(user.safeAllowedWorkerDirectoryScopes)
+        let hasTeamScope = user.hasScopeKind("team")
+        let scopesToLoad = ["team", "managed", "recruited"].filter { allowedSet.contains($0) }
+        let cleanStart = (startDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanEnd = (endDate ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let isPeriodFiltered = !cleanStart.isEmpty || !cleanEnd.isEmpty
+
+        let repo = MiniBiRepository(httpClient: httpClient, keychain: KeychainStore.shared)
+        var rowsByScope: [String: [WorkerItem]] = [:]
+        var anyStatusCode: Int?
+        var firstError: (message: String, status: Int, code: String?)?
+
+        for sc in scopesToLoad {
+            var seenInScope: Set<String> = []
+            var scopeItems: [WorkerItem] = []
+            var cursor: String? = nil
+            pageLoop: for page in 1...10 {
+                let res = await repo.fetchWorkers(
+                    scope: sc,
+                    cursor: cursor,
+                    page: page,
+                    pageSize: 100
+                )
+                switch res {
+                case .success(let wData, let status):
+                    anyStatusCode = status
+                    var addedInPage = 0
+                    for item in wData.items {
+                        let key = item.maNld.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        guard !key.isEmpty, seenInScope.insert(key).inserted else { continue }
+                        scopeItems.append(item)
+                        addedInPage += 1
+                    }
+                    let nextCur = (wData.nextCursor ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let hasMorePages = wData.hasMore || !nextCur.isEmpty
+                    if !hasMorePages || addedInPage == 0 {
+                        break pageLoop
+                    }
+                    cursor = nextCur.isEmpty ? nil : nextCur
+                case .failure(let message, let httpStatus, let errorCode, _):
+                    if firstError == nil {
+                        firstError = (message, httpStatus ?? 0, errorCode)
+                    }
+                    break pageLoop
+                }
+            }
+            if isPeriodFiltered {
+                scopeItems = scopeItems.filter { item in
+                    let dateIso = WorkReportsContract.normalizeDateIso(item.ngayVaoLam)
+                    guard !dateIso.isEmpty else { return false }
+                    if !cleanStart.isEmpty && dateIso < cleanStart { return false }
+                    if !cleanEnd.isEmpty && dateIso > cleanEnd { return false }
+                    return true
+                }
+            }
+            rowsByScope[sc] = scopeItems
+        }
+
+        if anyStatusCode == nil, let err = firstError {
+            return .failure(message: err.message, httpStatus: err.status, errorCode: err.code)
+        }
+
+        var combinedSeen: Set<String> = []
+        var combinedWorkers: [WorkerItem] = []
+        for sc in scopesToLoad {
+            for item in rowsByScope[sc] ?? [] {
+                let key = item.maNld.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard !key.isEmpty, combinedSeen.insert(key).inserted else { continue }
+                combinedWorkers.append(item)
+            }
+        }
+
+        let teamTotal: Int? = allowedSet.contains("team") ? (rowsByScope["team"]?.count ?? 0) : nil
+        let managedTotal: Int? = allowedSet.contains("managed") ? (rowsByScope["managed"]?.count ?? 0) : nil
+        let recruitedTotal: Int? = allowedSet.contains("recruited") ? (rowsByScope["recruited"]?.count ?? 0) : nil
+        let audienceKind = hasTeamScope ? "team" : "own"
+        let scopeDesc: String = {
+            let base = hasTeamScope ? "Phạm vi nhóm phụ trách" : "Phạm vi cá nhân (dự án quản lý & tự tuyển)"
+            if isPeriodFiltered {
+                return "\(base) · Kỳ \(cleanStart) → \(cleanEnd)"
+            }
+            return base
+        }()
+
+        let snapshot = Self.buildGeneralOverviewSnapshotFromWorkers(
+            workers: combinedWorkers,
+            audienceKind: audienceKind,
+            scopeDescription: scopeDesc,
+            isPeriodFiltered: isPeriodFiltered,
+            periodFromDate: isPeriodFiltered ? cleanStart : nil,
+            periodToDate: isPeriodFiltered ? cleanEnd : nil,
+            managedTotal: managedTotal,
+            recruitedTotal: recruitedTotal,
+            teamTotal: teamTotal
+        )
+
+        var teamOptions: [BiBucketItem] = []
+        var teamReportsByKey: [String: TeamReportSnapshot] = [:]
+        var legacyTeams: [TeamSummaryRow] = []
+
+        if hasTeamScope {
+            let teamSourceWorkers = rowsByScope["team"] ?? combinedWorkers
+            var groupedByTeam: [String: (display: String, rows: [WorkerItem])] = [:]
+            let fallbackTeamRef = user.scopeReferences(forKind: "team").first ?? "team_scope"
+
+            for w in teamSourceWorkers {
+                let rawKey = w.teamId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .ifEmpty(w.nhom.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .ifEmpty(fallbackTeamRef)
+                let rawDisplay = w.nhom.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .ifEmpty(w.teamId.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .ifEmpty("Nhóm phụ trách")
+                var cur = groupedByTeam[rawKey] ?? (rawDisplay, [])
+                cur.rows.append(w)
+                groupedByTeam[rawKey] = cur
+            }
+
+            if groupedByTeam.isEmpty {
+                groupedByTeam[fallbackTeamRef] = ("Nhóm phụ trách", [])
+            }
+
+            let totalTeamWorkers = max(1, teamSourceWorkers.count)
+            let sortedTeamEntries = groupedByTeam.sorted { lhs, rhs in
+                if lhs.value.rows.count != rhs.value.rows.count {
+                    return lhs.value.rows.count > rhs.value.rows.count
+                }
+                return lhs.value.display < rhs.value.display
+            }
+
+            for entry in sortedTeamEntries {
+                let bKey = entry.key
+                let bDisplay = entry.value.display
+                let bRows = entry.value.rows
+                let reportSnap = Self.buildTeamReportFromWorkerRows(
+                    workers: bRows,
+                    bucketKey: bKey,
+                    bucketDisplay: bDisplay,
+                    isPeriodFiltered: isPeriodFiltered
+                )
+                teamReportsByKey[bKey] = reportSnap
+                let share = teamSourceWorkers.isEmpty ? 0.0 : (Double(bRows.count) * 100.0 / Double(totalTeamWorkers))
+                teamOptions.append(
+                    BiBucketItem(
+                        key: bKey,
+                        display: bDisplay,
+                        count: bRows.count,
+                        sharePct: share,
+                        onCount: reportSnap.workingCount,
+                        unconfirmedCount: reportSnap.waitingCount,
+                        offCount: reportSnap.leftCount
+                    )
+                )
+                legacyTeams.append(
+                    TeamSummaryRow(
+                        id: bKey,
+                        teamCode: bKey,
+                        teamName: bDisplay,
+                        leaderName: "",
+                        memberCount: reportSnap.activeRecruiterCount,
+                        totalWorkers: bRows.count,
+                        activeWorkers: reportSnap.workingCount ?? 0,
+                        inactiveWorkers: reportSnap.leftCount ?? 0,
+                        newWorkers: isPeriodFiltered ? bRows.count : 0,
+                        activeRatePct: bRows.isEmpty ? 0.0 : (Double(reportSnap.workingCount ?? 0) * 100.0 / Double(bRows.count)),
+                        members: []
+                    )
+                )
+            }
+        }
+
+        let legacyOverview = GeneralOverviewData(
+            scope: audienceKind,
+            kpis: GeneralOverviewKpis(
+                totalHeadcount: snapshot.totalProfiles,
+                activeCount: snapshot.workingCount,
+                inactiveCount: snapshot.leftCount,
+                interviewCount: snapshot.waitingCount,
+                newCount: isPeriodFiltered ? snapshot.totalProfiles : 0,
+                resignedInPeriodCount: isPeriodFiltered ? snapshot.leftCount : 0,
+                retentionRate: snapshot.workingRatePct ?? 0.0,
+                turnoverRate: snapshot.totalProfiles > 0 ? (Double(snapshot.leftCount) * 100.0 / Double(snapshot.totalProfiles)) : 0.0
+            )
+        )
+
+        return .success(
+            (
+                snapshot: snapshot,
+                teamOptions: teamOptions,
+                teamReportsByKey: teamReportsByKey,
+                canViewTeamReport: hasTeamScope,
+                legacyOverview: legacyOverview,
+                legacyTeamReport: TeamReportData(teams: legacyTeams)
+            ),
+            statusCode: anyStatusCode ?? 200
+        )
     }
 
     private static func normalizeWorkerDateIso(_ raw: String) -> String {

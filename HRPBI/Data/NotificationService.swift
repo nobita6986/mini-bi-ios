@@ -464,6 +464,10 @@ public final class MiniBiRepository {
         if let actorObj = root["actor"] as? [String: Any] {
             let sessionUserId = actorObj.optString("app_user_id").trimmingCharacters(in: .whitespacesAndNewlines)
             if sessionUserId.caseInsensitiveCompare(cleanUserId) == .orderedSame {
+                let sessionScopes = Self.parseActorScopes(actorObj["scopes"])
+                if !sessionScopes.isEmpty {
+                    copy.scopes = sessionScopes
+                }
                 if let suggestion = actorObj.optNullableString("self_recruiter_suggestion"), !suggestion.isEmpty {
                     copy.selfRecruiterSuggestion = suggestion
                 }
@@ -914,16 +918,15 @@ public final class MiniBiRepository {
             capabilities = rootPerms
         }
 
-        // Extract scope kinds from `scopes` array of objects (`[{"kind": "all"|"team"|"own", ...}]`) or string array
-        var rawScopeKinds: [String] = []
-        if let scopeDicts = obj["scopes"] as? [[String: Any]] {
-            for s in scopeDicts {
-                let kind = s.optString("kind").lowercased()
-                if !kind.isEmpty { rawScopeKinds.append(kind) }
-            }
-        } else {
-            rawScopeKinds = obj.optStringArray("scopes").map { $0.lowercased() }
+        // Extract `scopes` (`[{"kind": "all"|"team"|"own", "reference": ...}]` or string array)
+        var parsedScopes = parseActorScopes(obj["scopes"])
+        if parsedScopes.isEmpty {
+            parsedScopes = parseActorScopes(fallbackRoot?["scopes"])
         }
+        if parsedScopes.isEmpty, let rootActor = fallbackRoot?["actor"] as? [String: Any] {
+            parsedScopes = parseActorScopes(rootActor["scopes"])
+        }
+        let rawScopeKinds = parsedScopes.map(\.kind)
 
         // Fail-closed: only read canonical `allowed_worker_tabs`; never read `allowed_worker_scopes`
         // and never infer worker tabs from `scopes` or `capabilities`.
@@ -966,8 +969,44 @@ public final class MiniBiRepository {
             teamName: teamName,
             permissions: capabilities,
             allowedWorkerTabs: allowedWorkerTabs,
-            selfRecruiterSuggestion: selfRecruiterSuggestion
+            selfRecruiterSuggestion: selfRecruiterSuggestion,
+            scopes: parsedScopes
         )
+    }
+
+    public static func parseActorScopes(_ raw: Any?) -> [ActorScopeGrant] {
+        guard let raw, !(raw is NSNull) else { return [] }
+        var seen = Set<String>()
+        var grants: [ActorScopeGrant] = []
+
+        func appendGrant(kind: String, reference: String?) {
+            let cleanKind = kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !cleanKind.isEmpty else { return }
+            let cleanRef = reference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let dedupKey = "\(cleanKind)|\(cleanRef.lowercased())"
+            guard !seen.contains(dedupKey) else { return }
+            seen.insert(dedupKey)
+            grants.append(ActorScopeGrant(kind: cleanKind, reference: cleanRef.isEmpty ? nil : cleanRef))
+        }
+
+        if let dicts = raw as? [[String: Any]] {
+            for s in dicts {
+                let kind = s.optString("kind", "scope", "type")
+                let ref = s.optNullableString("reference", "ref", "team_id", "id", "value")
+                appendGrant(kind: kind, reference: ref)
+            }
+        } else if let arr = raw as? [Any] {
+            for elem in arr {
+                if let s = elem as? [String: Any] {
+                    let kind = s.optString("kind", "scope", "type")
+                    let ref = s.optNullableString("reference", "ref", "team_id", "id", "value")
+                    appendGrant(kind: kind, reference: ref)
+                } else if let str = elem as? String {
+                    appendGrant(kind: str, reference: nil)
+                }
+            }
+        }
+        return grants
     }
 
     private static func extractProvidedFieldValue(_ dict: [String: Any]?, _ keys: String...) -> String {
@@ -989,7 +1028,7 @@ public final class MiniBiRepository {
 
     public static func parseWorkerItem(_ obj: [String: Any]) -> WorkerItem {
         let empStatusDict = obj["employment_status"] as? [String: Any]
-        let employmentStatusRaw = (empStatusDict?.optString("status") ?? obj.optString("employment_status", "trang_thai", "status")).uppercased()
+        let employmentStatusRaw = (empStatusDict?.optString("status", "code") ?? obj.optString("employment_status", "employment_status_code", "employmentStatusCode", "trang_thai", "status")).uppercased()
         let trangThaiDisplay: String = {
             switch employmentStatusRaw {
             case "ON": return "Đang làm việc"
@@ -1104,6 +1143,15 @@ public final class MiniBiRepository {
             if rawLaborTypeDisplay.lowercased() == "chinh_thuc" { return "Chính thức" }
             return rawLaborTypeDisplay
         }()
+        let teamObj = (obj["team"] as? [String: Any]) ?? (recruiterObj?["team"] as? [String: Any])
+        let teamId = teamObj?.optString("team_id", "id", "code")
+            ?? recruiterObj?.optString("team_id", "team_code")
+            ?? obj.optString("team_id", "team_code")
+        let teamDisplay = teamObj?.optString("display", "display_name", "name")
+            ?? recruiterObj?.optString("team_display_name", "team_display")
+            ?? obj.optString("nhom", "team_name", "team_display")
+        let providerType = recruiterObj?.optString("provider_type", "providerType")
+            ?? obj.optString("provider_type", "providerType", "nguon_tuyen")
 
         return WorkerItem(
             maNld: entryId,
@@ -1123,7 +1171,7 @@ public final class MiniBiRepository {
             queQuan: address,
             ngayCap: issueDate,
             nganhNghe: laborTypeDisplay,
-            nhom: obj.optString("nhom", "team_name", "team_display"),
+            nhom: teamDisplay,
             soTaiKhoan: accountNumber,
             nganHang: bankName,
             chuTaiKhoan: accountHolder,
@@ -1142,7 +1190,9 @@ public final class MiniBiRepository {
             recruiterId: recruiterId,
             laborTypeKey: laborTypeKey,
             employmentStatusCode: cleanStatusCode,
-            employmentEffectiveDate: offDate
+            employmentEffectiveDate: offDate,
+            teamId: teamId,
+            providerType: providerType
         )
     }
 }

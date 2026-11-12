@@ -156,6 +156,17 @@ public struct SavedLoginAccount: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public struct ActorScopeGrant: Codable, Equatable, Sendable {
+    public let kind: String
+    public let reference: String?
+
+    public init(kind: String, reference: String? = nil) {
+        self.kind = kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanRef = reference?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.reference = cleanRef.isEmpty ? nil : cleanRef
+    }
+}
+
 public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
     public static let canonicalWorkerTabs: [String] = [
         "managed",
@@ -183,6 +194,39 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
     public let permissions: [String]
     public var allowedWorkerTabs: [String]
     public var selfRecruiterSuggestion: String?
+    public var scopes: [ActorScopeGrant]
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case username
+        case fullName
+        case role
+        case roleLabel
+        case email
+        case phone
+        case teamName
+        case permissions
+        case allowedWorkerTabs
+        case selfRecruiterSuggestion
+        case scopes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.username = try container.decode(String.self, forKey: .username)
+        self.fullName = try container.decode(String.self, forKey: .fullName)
+        self.role = try container.decodeIfPresent(String.self, forKey: .role) ?? "USER"
+        self.roleLabel = try container.decodeIfPresent(String.self, forKey: .roleLabel) ?? "Nhân sự"
+        self.email = try container.decodeIfPresent(String.self, forKey: .email) ?? ""
+        self.phone = try container.decodeIfPresent(String.self, forKey: .phone) ?? ""
+        self.teamName = try container.decodeIfPresent(String.self, forKey: .teamName) ?? ""
+        self.permissions = try container.decodeIfPresent([String].self, forKey: .permissions) ?? []
+        let rawTabs = try container.decodeIfPresent([String].self, forKey: .allowedWorkerTabs) ?? []
+        self.allowedWorkerTabs = Self.sanitizeAllowedWorkerTabs(rawTabs)
+        self.selfRecruiterSuggestion = try container.decodeIfPresent(String.self, forKey: .selfRecruiterSuggestion)
+        self.scopes = try container.decodeIfPresent([ActorScopeGrant].self, forKey: .scopes) ?? []
+    }
 
     public static func looksLikeLoginHandle(_ text: String, username: String = "") -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -219,6 +263,41 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
     /// Canonical worker directory scopes granted to this actor (excludes `"uploader"`).
     public var safeAllowedWorkerDirectoryScopes: [String] {
         safeAllowedWorkerTabs.filter { Self.canonicalWorkerDirectoryScopes.contains($0) }
+    }
+
+    public func hasScopeKind(_ kind: String) -> Bool {
+        let target = kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !target.isEmpty else { return false }
+        if scopes.contains(where: { $0.kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == target }) {
+            return true
+        }
+        switch target {
+        case "all":
+            return safeAllowedWorkerTabs.contains("all")
+        case "team":
+            return safeAllowedWorkerTabs.contains("team")
+        case "own":
+            return safeAllowedWorkerTabs.contains("managed") || safeAllowedWorkerTabs.contains("recruited")
+        default:
+            return safeAllowedWorkerTabs.contains(target)
+        }
+    }
+
+    public func scopeReferences(forKind kind: String) -> [String] {
+        let target = kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !target.isEmpty else { return [] }
+        var seen = Set<String>()
+        var refs: [String] = []
+        for s in scopes where s.kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == target {
+            if let ref = s.reference?.trimmingCharacters(in: .whitespacesAndNewlines), !ref.isEmpty {
+                let lower = ref.lowercased()
+                if !seen.contains(lower) {
+                    seen.insert(lower)
+                    refs.append(ref)
+                }
+            }
+        }
+        return refs
     }
 
     public func hasCapability(_ capability: String) -> Bool {
@@ -273,7 +352,8 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         permissions: [String] = [],
         allowedWorkerTabs: [String]? = nil,
         allowedWorkerScopes: [String] = [],
-        selfRecruiterSuggestion: String? = nil
+        selfRecruiterSuggestion: String? = nil,
+        scopes: [ActorScopeGrant] = []
     ) {
         self.id = id
         self.username = username
@@ -287,6 +367,7 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         self.allowedWorkerTabs = Self.sanitizeAllowedWorkerTabs(allowedWorkerTabs ?? allowedWorkerScopes)
         let cleanSuggestion = selfRecruiterSuggestion?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.selfRecruiterSuggestion = cleanSuggestion.isEmpty ? nil : cleanSuggestion
+        self.scopes = scopes
     }
 }
 
@@ -665,6 +746,264 @@ public struct TeamReportData: Equatable, Sendable {
 
     public init(teams: [TeamSummaryRow] = []) {
         self.teams = teams
+    }
+}
+
+public struct BiBucketItem: Identifiable, Equatable, Sendable {
+    public var id: String { key.isEmpty ? display : key }
+    public let key: String
+    public let display: String
+    public let count: Int
+    public let sharePct: Double
+    public let onCount: Int?
+    public let unconfirmedCount: Int?
+    public let offCount: Int?
+
+    public init(
+        key: String,
+        display: String,
+        count: Int,
+        sharePct: Double = 0.0,
+        onCount: Int? = nil,
+        unconfirmedCount: Int? = nil,
+        offCount: Int? = nil
+    ) {
+        self.key = key
+        self.display = display
+        self.count = count
+        self.sharePct = sharePct
+        self.onCount = onCount
+        self.unconfirmedCount = unconfirmedCount
+        self.offCount = offCount
+    }
+}
+
+public struct HiringDaySummary: Equatable, Sendable {
+    public let activeHiringDays: Int
+    public let avgPerActiveDay: Double?
+    public let peakDailyCount: Int?
+    public let peakDateIso: String?
+
+    public init(
+        activeHiringDays: Int = 0,
+        avgPerActiveDay: Double? = nil,
+        peakDailyCount: Int? = nil,
+        peakDateIso: String? = nil
+    ) {
+        self.activeHiringDays = activeHiringDays
+        self.avgPerActiveDay = avgPerActiveDay
+        self.peakDailyCount = peakDailyCount
+        self.peakDateIso = peakDateIso
+    }
+}
+
+public struct GeneralOverviewSnapshot: Equatable, Sendable {
+    public let asOfDate: String
+    public let scopeDescription: String
+    public let totalProfiles: Int
+    public let workingCount: Int
+    public let waitingCount: Int
+    public let leftCount: Int
+    public let audienceKind: String
+    public let isPeriodFiltered: Bool
+    public let workingRatePct: Double?
+    public let placementRatePct: Double?
+    public let retention7dPct: Double?
+    public let retention30dPct: Double?
+    public let closingTotalProfiles: Int?
+    public let closingWorkingCount: Int?
+    public let closingWaitingCount: Int?
+    public let closingLeftCount: Int?
+    public let projectCount: Int
+    public let recruiterCount: Int
+    public let managedTotal: Int?
+    public let recruitedTotal: Int?
+    public let teamTotal: Int?
+    public let activeHiringDays: Int
+    public let avgPerActiveDay: Double?
+    public let peakDailyCount: Int?
+    public let peakDateIso: String?
+    public let leadingProject: BiBucketItem?
+    public let byRecruiter: [BiBucketItem]
+    public let byProject: [BiBucketItem]
+    public let bySecondaryGroup: [BiBucketItem]
+    public let secondaryGroupTitle: String
+    public let byProvider: [BiBucketItem]
+    public let periodFromDate: String?
+    public let periodToDate: String?
+    public let periodNewEpisodes: Int?
+    public let periodOnInflow: Int?
+    public let periodOffInflow: Int?
+    public let periodNetOnChange: Int?
+
+    public init(
+        asOfDate: String = "",
+        scopeDescription: String = "Toàn hệ thống",
+        totalProfiles: Int = 0,
+        workingCount: Int = 0,
+        waitingCount: Int = 0,
+        leftCount: Int = 0,
+        audienceKind: String = "all",
+        isPeriodFiltered: Bool = false,
+        workingRatePct: Double? = nil,
+        placementRatePct: Double? = nil,
+        retention7dPct: Double? = nil,
+        retention30dPct: Double? = nil,
+        closingTotalProfiles: Int? = nil,
+        closingWorkingCount: Int? = nil,
+        closingWaitingCount: Int? = nil,
+        closingLeftCount: Int? = nil,
+        projectCount: Int = 0,
+        recruiterCount: Int = 0,
+        managedTotal: Int? = nil,
+        recruitedTotal: Int? = nil,
+        teamTotal: Int? = nil,
+        activeHiringDays: Int = 0,
+        avgPerActiveDay: Double? = nil,
+        peakDailyCount: Int? = nil,
+        peakDateIso: String? = nil,
+        leadingProject: BiBucketItem? = nil,
+        byRecruiter: [BiBucketItem] = [],
+        byProject: [BiBucketItem] = [],
+        bySecondaryGroup: [BiBucketItem] = [],
+        secondaryGroupTitle: String = "Cơ cấu theo nhóm tuyển dụng",
+        byProvider: [BiBucketItem] = [],
+        periodFromDate: String? = nil,
+        periodToDate: String? = nil,
+        periodNewEpisodes: Int? = nil,
+        periodOnInflow: Int? = nil,
+        periodOffInflow: Int? = nil,
+        periodNetOnChange: Int? = nil
+    ) {
+        self.asOfDate = asOfDate
+        self.scopeDescription = scopeDescription
+        self.totalProfiles = totalProfiles
+        self.workingCount = workingCount
+        self.waitingCount = waitingCount
+        self.leftCount = leftCount
+        self.audienceKind = audienceKind
+        self.isPeriodFiltered = isPeriodFiltered
+        self.workingRatePct = workingRatePct
+        self.placementRatePct = placementRatePct
+        self.retention7dPct = retention7dPct
+        self.retention30dPct = retention30dPct
+        self.closingTotalProfiles = closingTotalProfiles
+        self.closingWorkingCount = closingWorkingCount
+        self.closingWaitingCount = closingWaitingCount
+        self.closingLeftCount = closingLeftCount
+        self.projectCount = projectCount
+        self.recruiterCount = recruiterCount
+        self.managedTotal = managedTotal
+        self.recruitedTotal = recruitedTotal
+        self.teamTotal = teamTotal
+        self.activeHiringDays = activeHiringDays
+        self.avgPerActiveDay = avgPerActiveDay
+        self.peakDailyCount = peakDailyCount
+        self.peakDateIso = peakDateIso
+        self.leadingProject = leadingProject
+        self.byRecruiter = byRecruiter
+        self.byProject = byProject
+        self.bySecondaryGroup = bySecondaryGroup
+        self.secondaryGroupTitle = secondaryGroupTitle
+        self.byProvider = byProvider
+        self.periodFromDate = periodFromDate
+        self.periodToDate = periodToDate
+        self.periodNewEpisodes = periodNewEpisodes
+        self.periodOnInflow = periodOnInflow
+        self.periodOffInflow = periodOffInflow
+        self.periodNetOnChange = periodNetOnChange
+    }
+}
+
+public struct TeamDrillDownItem: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let businessDate: String
+    public let projectDisplay: String
+    public let recruiterDisplay: String
+    public let providerTypeDisplay: String
+    public let employmentTypeDisplay: String
+    public let recruitedCount: Int
+    public let firstWorkDate: String
+
+    public init(
+        id: String = UUID().uuidString,
+        businessDate: String,
+        projectDisplay: String,
+        recruiterDisplay: String,
+        providerTypeDisplay: String,
+        employmentTypeDisplay: String,
+        recruitedCount: Int,
+        firstWorkDate: String = ""
+    ) {
+        self.id = id
+        self.businessDate = businessDate
+        self.projectDisplay = projectDisplay
+        self.recruiterDisplay = recruiterDisplay
+        self.providerTypeDisplay = providerTypeDisplay
+        self.employmentTypeDisplay = employmentTypeDisplay
+        self.recruitedCount = recruitedCount
+        self.firstWorkDate = firstWorkDate.isEmpty ? businessDate : firstWorkDate
+    }
+}
+
+public struct TeamReportSnapshot: Equatable, Sendable {
+    public let bucketKey: String
+    public let bucketDisplay: String
+    public let totalRecruited: Int
+    public var rows: [TeamDrillDownItem]
+    public var nextCursor: String?
+    public let activeRecruiterCount: Int
+    public let activeProjectCount: Int
+    public let activeHiringDays: Int
+    public let avgPerActiveDay: Double?
+    public let peakDailyCount: Int?
+    public let peakDateIso: String?
+    public let workingCount: Int?
+    public let waitingCount: Int?
+    public let leftCount: Int?
+    public let byRecruiter: [BiBucketItem]
+    public let byProject: [BiBucketItem]
+    public let byEmployment: [BiBucketItem]
+    public let byProvider: [BiBucketItem]
+
+    public init(
+        bucketKey: String,
+        bucketDisplay: String,
+        totalRecruited: Int = 0,
+        rows: [TeamDrillDownItem] = [],
+        nextCursor: String? = nil,
+        activeRecruiterCount: Int = 0,
+        activeProjectCount: Int = 0,
+        activeHiringDays: Int = 0,
+        avgPerActiveDay: Double? = nil,
+        peakDailyCount: Int? = nil,
+        peakDateIso: String? = nil,
+        workingCount: Int? = nil,
+        waitingCount: Int? = nil,
+        leftCount: Int? = nil,
+        byRecruiter: [BiBucketItem] = [],
+        byProject: [BiBucketItem] = [],
+        byEmployment: [BiBucketItem] = [],
+        byProvider: [BiBucketItem] = []
+    ) {
+        self.bucketKey = bucketKey
+        self.bucketDisplay = bucketDisplay
+        self.totalRecruited = totalRecruited
+        self.rows = rows
+        self.nextCursor = nextCursor
+        self.activeRecruiterCount = activeRecruiterCount
+        self.activeProjectCount = activeProjectCount
+        self.activeHiringDays = activeHiringDays
+        self.avgPerActiveDay = avgPerActiveDay
+        self.peakDailyCount = peakDailyCount
+        self.peakDateIso = peakDateIso
+        self.workingCount = workingCount
+        self.waitingCount = waitingCount
+        self.leftCount = leftCount
+        self.byRecruiter = byRecruiter
+        self.byProject = byProject
+        self.byEmployment = byEmployment
+        self.byProvider = byProvider
     }
 }
 
@@ -1219,6 +1558,8 @@ public struct WorkerItem: Identifiable, Equatable, Sendable {
     public let laborTypeKey: String
     public let employmentStatusCode: String
     public let employmentEffectiveDate: String
+    public let teamId: String
+    public let providerType: String
 
     public static func isUuidLike(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1278,7 +1619,9 @@ public struct WorkerItem: Identifiable, Equatable, Sendable {
         recruiterId: String = "",
         laborTypeKey: String = "",
         employmentStatusCode: String = "ON",
-        employmentEffectiveDate: String = ""
+        employmentEffectiveDate: String = "",
+        teamId: String = "",
+        providerType: String = ""
     ) {
         self.maNld = maNld
         self.employeeCode = employeeCode
@@ -1318,6 +1661,8 @@ public struct WorkerItem: Identifiable, Equatable, Sendable {
         self.laborTypeKey = laborTypeKey
         self.employmentStatusCode = employmentStatusCode
         self.employmentEffectiveDate = employmentEffectiveDate
+        self.teamId = teamId
+        self.providerType = providerType
     }
 }
 
@@ -2345,6 +2690,18 @@ public extension Dictionary where Key == String, Value == Any {
             }
         }
         return defaultValue
+    }
+
+    func optNullableInt(_ keys: String...) -> Int? {
+        for key in keys {
+            guard let raw = self[key], !(raw is NSNull) else { continue }
+            if let i = raw as? Int { return i }
+            if let n = raw as? NSNumber { return n.intValue }
+            if let s = raw as? String, let parsed = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return parsed
+            }
+        }
+        return nil
     }
 
     func optInt64(_ keys: String...) -> Int64? {

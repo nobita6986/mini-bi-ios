@@ -3965,6 +3965,7 @@ final class HRPBTests: XCTestCase {
         let recordedAfterOpen = MockURLProtocol.recordedUrls()
         // Zero Dashboard endpoints called on app open / login!
         XCTAssertFalse(recordedAfterOpen.contains(where: { $0.contains("/api/reporting/") }))
+        XCTAssertFalse(recordedAfterOpen.contains(where: { $0.contains("/api/direct-entry/workers") }))
         XCTAssertFalse(recordedAfterOpen.contains(where: { $0.contains("/api/cccd-review") }))
         // Initial Attendance time anchor and history each called at most once!
         XCTAssertEqual(recordedAfterOpen.filter { $0.contains("/api/attendance/time") }.count, 1)
@@ -3979,7 +3980,7 @@ final class HRPBTests: XCTestCase {
         // 3. Switching to `.dashboard` loads Dashboard data lazily on demand
         vm.navigateTo(.dashboard)
         XCTAssertEqual(vm.currentDestination, .dashboard)
-        try await waitForRecordedUrl(containing: "/api/reporting/")
+        try await waitForRecordedUrl(containing: "/api/direct-entry/workers")
         await vm.performLogout()
     }
 
@@ -4740,7 +4741,10 @@ final class HRPBTests: XCTestCase {
         XCTAssertTrue(vm.hasLoadedDashboardInSession)
         XCTAssertFalse(vm.isLoadingDashboard)
         XCTAssertEqual(vm.generalOverview.kpis.totalHeadcount, 120)
+        XCTAssertEqual(vm.generalOverviewSnapshot?.totalProfiles, 120)
         XCTAssertEqual(vm.teamReport.teams.count, 1)
+        XCTAssertEqual(vm.teamScopeOptions.count, 1)
+        XCTAssertNotNil(vm.selectedTeamReport)
 
         let initialUrls = MockURLProtocol.recordedUrls()
         XCTAssertFalse(initialUrls.contains(where: { $0.contains("duplicate-cccd") }))
@@ -4751,6 +4755,8 @@ final class HRPBTests: XCTestCase {
         XCTAssertFalse(vm.hasLoadedDashboardInSession, "hasLoadedDashboardInSession must reset immediately on filter change")
         XCTAssertTrue(vm.isLoadingDashboard, "isLoadingDashboard must become true immediately on filter change")
         XCTAssertEqual(vm.generalOverview.kpis.totalHeadcount, 0, "Stale generalOverview KPIs must be cleared immediately")
+        XCTAssertNil(vm.generalOverviewSnapshot, "Stale generalOverviewSnapshot must be cleared immediately")
+        XCTAssertNil(vm.selectedTeamReport, "Stale selectedTeamReport must be cleared immediately")
         XCTAssertTrue(vm.teamReport.teams.isEmpty, "Stale teamReport must be cleared immediately")
 
         // Wait for delayed reload task to complete
@@ -4763,6 +4769,7 @@ final class HRPBTests: XCTestCase {
         XCTAssertTrue(vm.hasLoadedDashboardInSession, "hasLoadedDashboardInSession must become true after network completion")
         XCTAssertFalse(vm.isLoadingDashboard)
         XCTAssertEqual(vm.generalOverview.kpis.totalHeadcount, 42)
+        XCTAssertEqual(vm.generalOverviewSnapshot?.totalProfiles, 42)
     }
 
     @MainActor
@@ -5369,5 +5376,315 @@ final class HRPBTests: XCTestCase {
         vm.workReportHistorySelectedDate = "2099-12-31"
         vm.selectWorkReportHistoryDate("2099-12-31")
         XCTAssertEqual(vm.workReportHistorySelectedDate, todayIso)
+    }
+
+    // MARK: - Round 9: Dashboard Reporting Parity with Android & Zero Fake `on_count` Defaults
+
+    @MainActor
+    func testRound9_DashboardTeamReportNoFakeOnCountAndHiringSummaryAndDrillDownPagination() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.requestHandler = { request in
+            let url = request.url!
+            let path = url.path
+            let query = url.query ?? ""
+
+            if path == "/api/reporting/workforce-deep" {
+                let body = """
+                {
+                  "ok": true,
+                  "workforce": {
+                    "as_of_date": "2026-11-12",
+                    "snapshot": {
+                      "eligible_episode_total": 300,
+                      "on_count": 240,
+                      "off_count": 45,
+                      "unconfirmed_count": 15
+                    },
+                    "dimensions": {
+                      "by_team": {
+                        "buckets": [
+                          {"key": "team:team_1", "display": "Nhóm Tuyển dụng 1", "eligible_episode_count": 232, "on_count": 190, "off_count": 32, "unconfirmed_count": 10},
+                          {"key": "team:team_2", "display": "Nhóm Tuyển dụng 2", "eligible_episode_count": 68, "on_count": 50, "off_count": 13, "unconfirmed_count": 5}
+                        ]
+                      },
+                      "by_recruiter": {
+                        "buckets": [
+                          {"key": "rec_trang", "display": "VD Trang Way", "eligible_episode_count": 33},
+                          {"key": "rec_hung", "display": "Nguyễn Văn Hùng", "eligible_episode_count": 199}
+                        ]
+                      },
+                      "by_project": {
+                        "buckets": [
+                          {"key": "proj_a", "display": "Dự án Luxshare", "eligible_episode_count": 180},
+                          {"key": "proj_b", "display": "Dự án Compal", "eligible_episode_count": 120}
+                        ]
+                      }
+                    }
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path == "/api/reporting/team-report" {
+                let isTeam1 = query.contains("dGVhbV8x")
+                    || query.contains("VEVBTTE")
+                    || query.contains("VEVBTV8x")
+                    || query.contains("team_1")
+                let isTeam2 = !isTeam1
+                if isTeam2 && query.contains("from=") {
+                    // Simulate server returning 400 INVALID_FILTER when team_2 has 0 new recruits in filtered period
+                    let errBody = #"{"ok":false,"error":{"code":"INVALID_FILTER","message":"No rows in period"}}"#
+                    let resp = HTTPURLResponse(url: url, statusCode: 400, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                    return (resp, Data(errBody.utf8))
+                } else if isTeam2 {
+                    let body = """
+                    {
+                      "ok": true,
+                      "bucket": {"key": "team:team_2", "display": "Nhóm Tuyển dụng 2"},
+                      "report": {
+                        "recruitedTotal": 68,
+                        "activeRecruiterCount": 2,
+                        "activeProjectCount": 1
+                      }
+                    }
+                    """
+                    let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                    return (resp, Data(body.utf8))
+                } else {
+                    // team_1 report: byRecruiter only has recruitedCount (NO on_count!)
+                    let body = """
+                    {
+                      "ok": true,
+                      "bucket": {"key": "team:team_1", "display": "Nhóm Tuyển dụng 1"},
+                      "report": {
+                        "recruitedTotal": 232,
+                        "activeRecruiterCount": 2,
+                        "activeProjectCount": 2,
+                        "byDate": [
+                          {"businessDate": "2026-11-01", "recruitedCount": 10},
+                          {"businessDate": "2026-11-02", "recruitedCount": 25},
+                          {"businessDate": "2026-11-03", "recruitedCount": 0},
+                          {"businessDate": "2026-11-04", "recruitedCount": 13}
+                        ],
+                        "byRecruiter": [
+                          {"recruiterKey": "rec_trang", "recruiterDisplay": "VD Trang Way", "recruitedCount": 33},
+                          {"recruiterKey": "rec_hung", "recruiterDisplay": "Nguyễn Văn Hùng", "recruitedCount": 199}
+                        ],
+                        "byProject": [
+                          {"projectKey": "proj_a", "projectDisplay": "Dự án Luxshare", "recruitedCount": 150},
+                          {"projectKey": "proj_b", "projectDisplay": "Dự án Compal", "recruitedCount": 82}
+                        ]
+                      },
+                      "detail": {
+                        "rows": [
+                          {
+                            "id": "row_1",
+                            "businessDate": "2026-11-04",
+                            "projectDisplay": "Dự án Luxshare",
+                            "recruiterDisplay": "VD Trang Way",
+                            "providerTypeDisplay": "Vendor",
+                            "employmentTypeDisplay": "Thời vụ",
+                            "recruitedCount": 5
+                          }
+                        ],
+                        "nextCursor": "CURSOR_PAGE_2"
+                      }
+                    }
+                    """
+                    let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                    return (resp, Data(body.utf8))
+                }
+            } else if path == "/api/reporting/team-drill-down" {
+                let body = """
+                {
+                  "ok": true,
+                  "detail": {
+                    "rows": [
+                      {
+                        "id": "row_2",
+                        "businessDate": "2026-11-02",
+                        "projectDisplay": "Dự án Compal",
+                        "recruiterDisplay": "Nguyễn Văn Hùng",
+                        "providerTypeDisplay": "Nội bộ HRP",
+                        "employmentTypeDisplay": "Chính thức",
+                        "recruitedCount": 12
+                      }
+                    ],
+                    "nextCursor": null
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            }
+
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(#"{"ok":true}"#.utf8))
+        }
+
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.r9dash.\(UUID().uuidString)"))
+        let vm = MiniBiViewModel(
+            repository: repo,
+            directEntryService: DirectEntryService(httpClient: client),
+            workReportsService: WorkReportsAndReportingService(httpClient: client)
+        )
+        vm.currentUser = MiniBiUser(
+            id: "aaaa1111-2222-4333-8444-555555555555",
+            username: "admin.user",
+            fullName: "Admin User",
+            permissions: ["entry_read"],
+            allowedWorkerTabs: ["all"],
+            scopes: [ActorScopeGrant(kind: "all", reference: nil)]
+        )
+        vm.isAuthenticated = true
+
+        vm.applyDatePreset(.all, reload: false)
+        await vm.loadDashboardData(force: true)
+
+        // 1. Verify GeneralOverviewSnapshot & TeamReportSnapshot do NOT invent fake `onCount = count`
+        guard let overview = vm.generalOverviewSnapshot else {
+            XCTFail("generalOverviewSnapshot must be loaded")
+            return
+        }
+        XCTAssertEqual(overview.totalProfiles, 300)
+        let ovTrang = overview.byRecruiter.first(where: { $0.display == "VD Trang Way" })
+        XCTAssertNotNil(ovTrang)
+        XCTAssertEqual(ovTrang?.count, 33)
+        XCTAssertNil(ovTrang?.onCount, "onCount must be nil when Server JSON does not include on_count")
+        XCTAssertNil(ovTrang?.offCount, "offCount must be nil when Server JSON does not include off_count")
+
+        guard let team1 = vm.selectedTeamReport else {
+            XCTFail("selectedTeamReport must be auto-loaded for default team")
+            return
+        }
+        XCTAssertEqual(team1.bucketKey, "team:team_1")
+        XCTAssertEqual(team1.totalRecruited, 232)
+        let teamTrang = team1.byRecruiter.first(where: { $0.display == "VD Trang Way" })
+        XCTAssertNotNil(teamTrang)
+        XCTAssertEqual(teamTrang?.count, 33)
+        XCTAssertEqual(teamTrang?.sharePct ?? 0, 33.0 * 100.0 / 232.0, accuracy: 0.05) // ~14.22%
+        XCTAssertNil(teamTrang?.onCount, "Team recruiter bucket must NEVER fake onCount = 33")
+        XCTAssertNil(teamTrang?.offCount, "Team recruiter bucket must NEVER fake offCount = 0")
+
+        // 2. Verify HiringDaySummary from `byDate` (3 active days: 10 + 25 + 13 = 48 -> avg = 16.0, peak = 25 on 2026-11-02)
+        XCTAssertEqual(team1.activeHiringDays, 3)
+        XCTAssertEqual(team1.avgPerActiveDay ?? 0, 16.0, accuracy: 0.01)
+        XCTAssertEqual(team1.peakDailyCount, 25)
+        XCTAssertEqual(team1.peakDateIso, "2026-11-02")
+
+        // 3. Verify drill-down pagination via `/api/reporting/team-drill-down`
+        XCTAssertEqual(team1.rows.count, 1)
+        XCTAssertEqual(team1.nextCursor, "CURSOR_PAGE_2")
+        await vm.loadMoreTeamDrillDown()
+        XCTAssertEqual(vm.selectedTeamReport?.rows.count, 2)
+        XCTAssertNil(vm.selectedTeamReport?.nextCursor)
+
+        // 4. Verify switching to team_2 in a filtered period when Server returns 400 INVALID_FILTER (0 recruits in period)
+        vm.filterStartDate = "2026-11-01"
+        vm.filterEndDate = "2026-11-12"
+        await vm.loadTeamReport("team:team_2")
+        XCTAssertNil(vm.teamReportErrorMessage, "Valid team with 0 recruits in period must not show error")
+        XCTAssertEqual(vm.selectedTeamReport?.bucketDisplay, "Nhóm Tuyển dụng 2")
+        XCTAssertEqual(vm.selectedTeamReport?.totalRecruited, 0)
+        XCTAssertTrue(vm.selectedTeamReport?.rows.isEmpty == true)
+    }
+
+    @MainActor
+    func testRound9_ScopedDashboardTeamAndOwnAccountsFromDirectEntryWorkers() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.requestHandler = { request in
+            let url = request.url!
+            let path = url.path
+            if path == "/api/direct-entry/workers" {
+                let body = """
+                {
+                  "ok": true,
+                  "items": [
+                    {
+                      "ma_nld": "W001",
+                      "ho_ten": "Công nhân A",
+                      "du_an": "Dự án Foxconn",
+                      "nguoi_tuyen": "Trần Thị B",
+                      "ngay_vao_lam": "2026-11-05",
+                      "employment_status_code": "ON",
+                      "nganh_nghe": "Chính thức",
+                      "provider_type": "internal",
+                      "team_id": "team_1",
+                      "team_display": "Nhóm Tuyển dụng 1"
+                    },
+                    {
+                      "ma_nld": "W002",
+                      "ho_ten": "Công nhân B",
+                      "du_an": "Dự án Foxconn",
+                      "nguoi_tuyen": "Trần Thị B",
+                      "ngay_vao_lam": "2026-11-06",
+                      "employment_status_code": "OFF",
+                      "nganh_nghe": "Thời vụ",
+                      "provider_type": "vendor",
+                      "team_id": "team_1",
+                      "team_display": "Nhóm Tuyển dụng 1"
+                    }
+                  ],
+                  "total": 2,
+                  "page": 1,
+                  "total_pages": 1,
+                  "has_more": false
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(#"{"ok":true}"#.utf8))
+        }
+
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.r9scoped.\(UUID().uuidString)"))
+        let vm = MiniBiViewModel(
+            repository: repo,
+            directEntryService: DirectEntryService(httpClient: client),
+            workReportsService: WorkReportsAndReportingService(httpClient: client)
+        )
+
+        // Team leader account (has "team" scope, not "all")
+        vm.currentUser = MiniBiUser(
+            id: "bbbb1111-2222-4333-8444-555555555555",
+            username: "leader.user",
+            fullName: "Team Leader",
+            permissions: ["entry_read"],
+            allowedWorkerTabs: ["team", "recruited"],
+            scopes: [
+                ActorScopeGrant(kind: "team", reference: "team_1"),
+                ActorScopeGrant(kind: "recruited", reference: nil)
+            ]
+        )
+        vm.isAuthenticated = true
+        vm.applyDatePreset(.all, reload: false)
+        await vm.loadDashboardData(force: true)
+
+        XCTAssertTrue(vm.canViewTeamReport)
+        XCTAssertEqual(vm.generalOverviewSnapshot?.audienceKind, "team")
+        XCTAssertEqual(vm.generalOverviewSnapshot?.totalProfiles, 2)
+        XCTAssertEqual(vm.generalOverviewSnapshot?.workingCount, 1)
+        XCTAssertEqual(vm.generalOverviewSnapshot?.leftCount, 1)
+        XCTAssertEqual(vm.generalOverviewSnapshot?.secondaryGroupTitle, "Cơ cấu theo loại hình lao động")
+        XCTAssertEqual(vm.selectedTeamReport?.totalRecruited, 2)
+        XCTAssertEqual(vm.selectedTeamReport?.workingCount, 1)
+        XCTAssertEqual(vm.selectedTeamReport?.leftCount, 1)
+
+        // Personal recruiter account (only "recruited" scope -> canViewTeamReport must be false)
+        vm.currentUser = MiniBiUser(
+            id: "cccc1111-2222-4333-8444-555555555555",
+            username: "recruiter.user",
+            fullName: "Recruiter User",
+            permissions: ["entry_read"],
+            allowedWorkerTabs: ["recruited"],
+            scopes: [ActorScopeGrant(kind: "recruited", reference: nil)]
+        )
+        await vm.loadDashboardData(force: true)
+        XCTAssertFalse(vm.canViewTeamReport)
+        XCTAssertEqual(vm.generalOverviewSnapshot?.audienceKind, "own")
+        XCTAssertNil(vm.selectedTeamReport)
     }
 }
