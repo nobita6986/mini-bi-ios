@@ -2648,6 +2648,12 @@ public final class WorkReportsAndReportingService {
             ?? fallback?.reviewComment
         let unitName = obObj.optNullableString("org_unit_name", "unit_name", "department_name")
             ?? fallback?.unitName
+        let assigneeUserId = obObj.optString("assignee_user_id", "subject_user_id", "app_user_id", "user_id")
+            .ifEmpty(dataRoot.optString("assignee_user_id", "subject_user_id", "app_user_id", "user_id"))
+            .ifEmpty(fallback?.assigneeUserId ?? "")
+        let assigneeDisplayName = obObj.optString("assignee_display_name", "subject_display_name", "assignee_name", "employee_display_name")
+            .ifEmpty(dataRoot.optString("assignee_display_name", "subject_display_name", "assignee_name", "employee_display_name"))
+            .ifEmpty(fallback?.assigneeDisplayName ?? "")
 
         let schemaRaw: Any? = obObj["schema_json"]
             ?? obObj["schema"]
@@ -2719,6 +2725,8 @@ public final class WorkReportsAndReportingService {
             reviewerName: reviewerName,
             reviewComment: reviewComment,
             unitName: unitName,
+            assigneeUserId: assigneeUserId,
+            assigneeDisplayName: assigneeDisplayName,
             sections: sections,
             formPayload: formPayload
         )

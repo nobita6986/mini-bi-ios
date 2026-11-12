@@ -228,6 +228,8 @@ public final class MiniBiViewModel: ObservableObject {
 
     // MARK: - Recruitment Posts ("Tin tuyển dụng" — Read-Only) State
     @Published public var recruitmentPosts: [RecruitmentPostItem] = []
+    @Published public var selectedRecruitmentIndustrialParkId: String? = nil
+    @Published public var selectedRecruitmentLaborTypeKey: String? = nil
     @Published public var recruitmentPostsLoading: Bool = false
     @Published public var recruitmentPostsLoadingMore: Bool = false
     @Published public var recruitmentPostsError: String?
@@ -451,6 +453,12 @@ public final class MiniBiViewModel: ObservableObject {
             }
         }
 
+        self.attendanceOutboxService.onResolvedEmployeeDisplayName = { [weak self] resolvedName in
+            Task { @MainActor [weak self] in
+                self?.applyResolvedCurrentUserFullNameIfNeeded(resolvedName)
+            }
+        }
+
         self.taskReminderManager.onRemindersChanged = { [weak self] updated in
             Task { @MainActor [weak self] in
                 self?.taskReminders = updated
@@ -459,6 +467,21 @@ public final class MiniBiViewModel: ObservableObject {
     }
 
     // MARK: - Local Task Reminders ("Nhắc việc")
+
+    public func applyResolvedCurrentUserFullNameIfNeeded(_ candidateName: String) {
+        guard var user = currentUser else { return }
+        let cleanCandidate = candidateName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanCandidate.isEmpty,
+              !MiniBiUser.looksLikeLoginHandle(cleanCandidate, username: user.username) else {
+            return
+        }
+        if MiniBiUser.looksLikeLoginHandle(user.fullName, username: user.username) {
+            user.fullName = cleanCandidate
+            currentUser = user
+        }
+        repository.saveResolvedFullName(cleanCandidate, forUserId: user.id, username: user.username)
+        savedAccounts = repository.getSavedLoginAccounts()
+    }
 
     public func refreshTaskReminders() {
         taskReminders = taskReminderManager.reconcileExpiredOnceReminders()
@@ -822,7 +845,15 @@ public final class MiniBiViewModel: ObservableObject {
             salaryAdvanceSelectedProjectId = nil
             resetRecruitmentPostsState()
         }
-        currentUser = user
+        var resolvedUser = user
+        if MiniBiUser.looksLikeLoginHandle(resolvedUser.fullName, username: resolvedUser.username),
+           let cachedName = repository.getCachedResolvedFullName(forUserId: resolvedUser.id, username: resolvedUser.username) {
+            resolvedUser.fullName = cachedName
+        } else if !MiniBiUser.looksLikeLoginHandle(resolvedUser.fullName, username: resolvedUser.username) {
+            repository.saveResolvedFullName(resolvedUser.fullName, forUserId: resolvedUser.id, username: resolvedUser.username)
+        }
+        currentUser = resolvedUser
+        savedAccounts = repository.getSavedLoginAccounts()
         selectedWorkerScope = Self.resolveVisibleWorkerTabs(for: user).first?.key ?? ""
         isAuthenticated = true
         let allowedDestinations = MiniBiNavDestination.resolveMainNavigationDestinations(for: user)
@@ -1464,6 +1495,18 @@ public final class MiniBiViewModel: ObservableObject {
             guard !Task.isCancelled, self.isSessionValid(token) else { return }
             if case .success(let opts, _) = res {
                 self.directEntryOptions = opts
+                if let user = self.currentUser {
+                    let candidateKeys = [
+                        user.selfRecruiterSuggestion ?? "",
+                        self.myLeaveSummary?.account?.recruiterId ?? ""
+                    ].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                    if !candidateKeys.isEmpty,
+                       let matchedRec = opts.catalogRecruiters.first(where: { rec in
+                           candidateKeys.contains(where: { $0.caseInsensitiveCompare(rec.recruiterId) == .orderedSame })
+                       }) {
+                        self.applyResolvedCurrentUserFullNameIfNeeded(matchedRec.displayName)
+                    }
+                }
                 if let defaultLabor = opts.catalogLaborTypes.first(where: {
                     $0.displayName.lowercased().contains("thời vụ") ||
                     $0.laborTypeKey.uppercased() == "TEMPORARY" ||
@@ -3361,6 +3404,9 @@ public final class MiniBiViewModel: ObservableObject {
             attendanceHistoryPage = 1
             attendanceHistoryHasMore = attendanceOutboxService.lastHistorySyncHasMore
             attendanceHistoryTotalCount = attendanceOutboxService.lastHistorySyncTotalCount
+            if let empName = attendanceOutboxService.lastResolvedEmployeeDisplayName {
+                applyResolvedCurrentUserFullNameIfNeeded(empName)
+            }
             return true
         case .failure:
             attendanceOutboxItems = attendanceOutboxService.listItemsForUser(userKey: userKey)
@@ -3483,6 +3529,9 @@ public final class MiniBiViewModel: ObservableObject {
         switch apiResult {
         case .success:
             recordOutboxFlushSuccess()
+            if let empName = attendanceOutboxService.lastResolvedEmployeeDisplayName {
+                applyResolvedCurrentUserFullNameIfNeeded(empName)
+            }
             todayServerAttendanceCount = max(
                 todayServerAttendanceCount,
                 attendanceOutboxService.todaySyncedCountForUser(userKey: userKey)
@@ -3749,6 +3798,16 @@ public final class MiniBiViewModel: ObservableObject {
                 self.leaveYear = summary.leaveYear
                 self.myLeaveError = nil
                 self.myLeaveErrorCode = nil
+                if let accName = summary.account?.displayName, !accName.isEmpty {
+                    self.applyResolvedCurrentUserFullNameIfNeeded(accName)
+                }
+                if let recId = summary.account?.recruiterId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !recId.isEmpty,
+                   let matchedRec = self.directEntryOptions.catalogRecruiters.first(where: {
+                       $0.recruiterId.caseInsensitiveCompare(recId) == .orderedSame
+                   }) {
+                    self.applyResolvedCurrentUserFullNameIfNeeded(matchedRec.displayName)
+                }
                 self.ensureInitialLeaveDraftDay()
 
                 let visibleTabs = self.resolveVisibleAttendanceTabs()
@@ -4583,6 +4642,19 @@ public final class MiniBiViewModel: ObservableObject {
         guard !Task.isCancelled, isSessionValid(token) else { return }
         if case .success(let list, _) = res {
             workReportObligations = list
+            if let user = currentUser {
+                let cleanUserId = user.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let matchedOb = list.first(where: {
+                    !$0.assigneeDisplayName.isEmpty &&
+                    !MiniBiUser.looksLikeLoginHandle($0.assigneeDisplayName, username: user.username) &&
+                    (!cleanUserId.isEmpty && $0.assigneeUserId.caseInsensitiveCompare(cleanUserId) == .orderedSame)
+                }) ?? list.first(where: {
+                    !$0.assigneeDisplayName.isEmpty &&
+                    !MiniBiUser.looksLikeLoginHandle($0.assigneeDisplayName, username: user.username)
+                }) {
+                    applyResolvedCurrentUserFullNameIfNeeded(matchedOb.assigneeDisplayName)
+                }
+            }
             // Keep open editor synchronized if present (without wiping unsaved editorFieldValues!)
             if let currentEditor = selectedObligationEditor,
                let refreshed = list.first(where: {
@@ -4852,9 +4924,107 @@ public final class MiniBiViewModel: ObservableObject {
         recruitmentPostDetailLoading = false
     }
 
+    public var hasActiveRecruitmentPostFilter: Bool {
+        selectedRecruitmentIndustrialParkId != nil || selectedRecruitmentLaborTypeKey != nil
+    }
+
+    public var availableRecruitmentIndustrialParkFilters: [RecruitmentPostIndustrialParkSummary] {
+        var seen = Set<String>()
+        var result: [RecruitmentPostIndustrialParkSummary] = []
+        for item in recruitmentPosts {
+            let ipId = item.industrialPark.industrialParkId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !ipId.isEmpty, !seen.contains(ipId) else { continue }
+            seen.insert(ipId)
+            result.append(item.industrialPark)
+        }
+        let viLocale = Locale(identifier: "vi_VN")
+        return result.sorted {
+            $0.displayName.compare($1.displayName, options: [.caseInsensitive, .diacriticInsensitive], range: nil, locale: viLocale) == .orderedAscending
+        }
+    }
+
+    public var availableRecruitmentLaborTypeFilters: [RecruitmentPostLaborTypeSummary] {
+        var seen = Set<String>()
+        var result: [RecruitmentPostLaborTypeSummary] = []
+        for item in recruitmentPosts {
+            for lt in item.general.laborTypes {
+                let key = lt.laborTypeKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !key.isEmpty, !seen.contains(key) else { continue }
+                seen.insert(key)
+                result.append(lt)
+            }
+        }
+        let viLocale = Locale(identifier: "vi_VN")
+        return result.sorted {
+            $0.displayName.compare($1.displayName, options: [.caseInsensitive, .diacriticInsensitive], range: nil, locale: viLocale) == .orderedAscending
+        }
+    }
+
+    public var filteredRecruitmentPosts: [RecruitmentPostItem] {
+        recruitmentPosts.filter { item in
+            if let kcnId = selectedRecruitmentIndustrialParkId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !kcnId.isEmpty,
+               item.industrialPark.industrialParkId != kcnId {
+                return false
+            }
+            if let laborKey = selectedRecruitmentLaborTypeKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !laborKey.isEmpty,
+               !item.general.laborTypes.contains(where: { $0.laborTypeKey == laborKey }) {
+                return false
+            }
+            return true
+        }
+    }
+
+    public func selectRecruitmentIndustrialParkFilter(_ industrialParkId: String?) async {
+        let clean = industrialParkId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        selectedRecruitmentIndustrialParkId = clean.isEmpty ? nil : clean
+        if hasActiveRecruitmentPostFilter {
+            await ensureAllRecruitmentPostsLoadedForFiltering()
+        }
+    }
+
+    public func selectRecruitmentLaborTypeFilter(_ laborTypeKey: String?) async {
+        let clean = laborTypeKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        selectedRecruitmentLaborTypeKey = clean.isEmpty ? nil : clean
+        if hasActiveRecruitmentPostFilter {
+            await ensureAllRecruitmentPostsLoadedForFiltering()
+        }
+    }
+
+    public func clearRecruitmentPostFilters() {
+        selectedRecruitmentIndustrialParkId = nil
+        selectedRecruitmentLaborTypeKey = nil
+    }
+
+    public func ensureAllRecruitmentPostsLoadedForFiltering() async {
+        guard hasActiveRecruitmentPostFilter else { return }
+        let maxAutoPages = 20
+        var loadedPages = 0
+        while hasActiveRecruitmentPostFilter && recruitmentPostsHasMore && loadedPages < maxAutoPages {
+            guard !Task.isCancelled,
+                  !recruitmentPostsLoading,
+                  !recruitmentPostsLoadingMore,
+                  !recruitmentPostsAccessDenied,
+                  !recruitmentPostsFeatureUnavailable else {
+                break
+            }
+            let prevCursor = recruitmentPostsNextCursor
+            let prevCount = recruitmentPosts.count
+            loadedPages += 1
+            await loadMoreRecruitmentPosts()
+            if recruitmentPostsError != nil ||
+                (recruitmentPostsNextCursor == prevCursor && recruitmentPosts.count == prevCount) {
+                break
+            }
+        }
+    }
+
     public func resetRecruitmentPostsState() {
         cancelInFlightRecruitmentPostRequests()
         recruitmentPosts = []
+        selectedRecruitmentIndustrialParkId = nil
+        selectedRecruitmentLaborTypeKey = nil
         recruitmentPostsError = nil
         recruitmentPostsErrorCode = nil
         recruitmentPostsHasMore = false
@@ -4869,6 +5039,9 @@ public final class MiniBiViewModel: ObservableObject {
 
     public func loadRecruitmentPosts(reset: Bool = true) async {
         await loadRecruitmentPostsInternal(reset: reset, isSnapshotInvalidRetry: false)
+        if reset && hasActiveRecruitmentPostFilter {
+            await ensureAllRecruitmentPostsLoadedForFiltering()
+        }
     }
 
     public func loadMoreRecruitmentPosts() async {

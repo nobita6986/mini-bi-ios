@@ -11,7 +11,8 @@ public struct RecruitmentPostProjectSummary: Equatable, Sendable {
     }
 }
 
-public struct RecruitmentPostIndustrialParkSummary: Equatable, Sendable {
+public struct RecruitmentPostIndustrialParkSummary: Identifiable, Equatable, Sendable {
+    public var id: String { industrialParkId }
     public let industrialParkId: String
     public let industrialParkCode: String
     public let displayName: String
@@ -42,7 +43,8 @@ public struct RecruitmentPostProvinceSummary: Equatable, Sendable {
     }
 }
 
-public struct RecruitmentPostLaborTypeSummary: Equatable, Sendable {
+public struct RecruitmentPostLaborTypeSummary: Identifiable, Equatable, Sendable {
+    public var id: String { laborTypeKey }
     public let laborTypeKey: String
     public let displayName: String
 
@@ -165,9 +167,11 @@ public struct RecruitmentPostCardViewModel: Equatable, Identifiable, Sendable {
     public let projectName: String
     public let customerNameDisplay: String
     public let provinceName: String
+    public let industrialParkId: String
     public let industrialParkName: String
     public let locationDisplay: String
     public let jobDescriptionDisplay: String
+    public let laborTypes: [RecruitmentPostLaborTypeSummary]
     public let laborTypesDisplay: String
     public let expectedHeadcountDisplay: String
     public let genderDisplay: String
@@ -338,7 +342,7 @@ public enum RecruitmentPostContract {
     public static let genderRequirementLabels: [String: String] = [
         "FEMALE": "Nữ",
         "MALE": "Nam",
-        "ANY": "Cặp Nam/Nữ"
+        "ANY": "Nam/Nữ"
     ]
 
     public static let educationRequirementLabels: [String: String] = [
@@ -644,9 +648,11 @@ public enum RecruitmentPostContract {
             projectName: projectName,
             customerNameDisplay: customerNameDisplay,
             provinceName: provinceName,
+            industrialParkId: item.industrialPark.industrialParkId,
             industrialParkName: industrialParkName,
             locationDisplay: locationDisplay,
             jobDescriptionDisplay: jobDescriptionDisplay,
+            laborTypes: item.general.laborTypes,
             laborTypesDisplay: laborTypesDisplay,
             expectedHeadcountDisplay: expectedHeadcountDisplay,
             genderDisplay: genderDisplay,
