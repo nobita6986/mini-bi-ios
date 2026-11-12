@@ -3020,14 +3020,14 @@ public final class WorkReportsAndReportingService {
                         addedInPage += 1
                     }
                     let nextCur = (wData.nextCursor ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    let hasMorePages = wData.hasMore || (page < wData.totalPages)
+                    let hasMorePages = wData.hasMore || !nextCur.isEmpty
                     if !hasMorePages || addedInPage == 0 {
                         break
                     }
                     cursor = nextCur.isEmpty ? nil : nextCur
                 case .failure(let message, let httpStatus, let errorCode, _):
                     if firstError == nil {
-                        firstError = (message, httpStatus, errorCode)
+                        firstError = (message, httpStatus ?? 0, errorCode)
                     }
                     break
                 }
