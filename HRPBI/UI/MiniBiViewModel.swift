@@ -49,16 +49,30 @@ public final class MiniBiViewModel: ObservableObject {
     public private(set) var nextAllowedOutboxFlushElapsedMs: Int64 = 0
     public var backoffJitterProvider: () -> Double = { Double.random(in: 0.0...1.0) }
 
-    // MARK: - Notifications (SSE + List) & Local Task Reminders
+    // MARK: - Notifications (SSE + List), Local Task Reminders & HRPartner Bulletin
     @Published public var notifications: [AppNotificationItem] = []
     @Published public var unreadNotificationCount: Int = 0
     @Published public var isNotificationSheetPresented: Bool = false
     @Published public var isTaskReminderSheetPresented: Bool = false
     @Published public var taskReminders: [TaskReminderItem] = []
+    @Published public var isBulletinSheetPresented: Bool = false
+    @Published public var bulletinItems: [HrpBulletinItem] = HrpBulletinItem.defaultMockupItems
+    @Published public var selectedBulletinCategory: HrpBulletinCategory = .all
     private var announcedNotificationIds: Set<Int64> = []
 
     public var enabledRemindersCount: Int {
         taskReminders.filter { $0.isEnabled }.count
+    }
+
+    public var filteredBulletinItems: [HrpBulletinItem] {
+        if selectedBulletinCategory == .all {
+            return bulletinItems
+        }
+        return bulletinItems.filter { $0.category == selectedBulletinCategory }
+    }
+
+    public var pinnedBulletinCount: Int {
+        bulletinItems.filter { $0.isPinned }.count
     }
 
     // MARK: - Dashboard & CCCD Review State

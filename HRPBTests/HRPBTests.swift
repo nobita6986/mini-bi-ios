@@ -5705,4 +5705,23 @@ final class HRPBTests: XCTestCase {
         XCTAssertEqual(vm.generalOverviewSnapshot?.totalProfiles, 0)
         XCTAssertNil(vm.selectedTeamReport)
     }
+
+    @MainActor
+    func testRound9_HrpBulletinMockupItemsAndCategoryFilter() {
+        let vm = MiniBiViewModel()
+        XCTAssertFalse(vm.isBulletinSheetPresented)
+        XCTAssertEqual(vm.selectedBulletinCategory, .all)
+        XCTAssertEqual(vm.bulletinItems.count, 3)
+        XCTAssertEqual(vm.pinnedBulletinCount, 2)
+        XCTAssertTrue(vm.bulletinItems.contains(where: { $0.title == "Tin nhân sự ngày 13-11-2026" }))
+        XCTAssertTrue(vm.bulletinItems.contains(where: { $0.title == "Lịch nghỉ lễ ngày Văn hóa Việt Nam" }))
+
+        vm.selectedBulletinCategory = .hrNews
+        XCTAssertEqual(vm.filteredBulletinItems.count, 1)
+        XCTAssertEqual(vm.filteredBulletinItems.first?.title, "Tin nhân sự ngày 13-11-2026")
+
+        vm.selectedBulletinCategory = .holidaySchedule
+        XCTAssertEqual(vm.filteredBulletinItems.count, 1)
+        XCTAssertEqual(vm.filteredBulletinItems.first?.title, "Lịch nghỉ lễ ngày Văn hóa Việt Nam")
+    }
 }

@@ -2649,6 +2649,124 @@ public struct AppNotificationItem: Identifiable, Equatable, Sendable {
     }
 }
 
+// MARK: - HRPartner Bulletin (Bản tin HRPartner) Models
+
+public enum HrpBulletinCategory: String, CaseIterable, Identifiable, Codable, Equatable, Sendable {
+    case all = "ALL"
+    case hrNews = "HR_NEWS"
+    case holidaySchedule = "HOLIDAY_SCHEDULE"
+    case internalPolicy = "INTERNAL_POLICY"
+
+    public var id: String { rawValue }
+
+    public var titleVi: String {
+        switch self {
+        case .all:
+            return "Tất cả"
+        case .hrNews:
+            return "Tin nhân sự"
+        case .holidaySchedule:
+            return "Lịch nghỉ lễ"
+        case .internalPolicy:
+            return "Vận hành"
+        }
+    }
+
+    public var iconName: String {
+        switch self {
+        case .all:
+            return "newspaper.fill"
+        case .hrNews:
+            return "person.2.wave.2.fill"
+        case .holidaySchedule:
+            return "calendar.badge.clock"
+        case .internalPolicy:
+            return "checkmark.shield.fill"
+        }
+    }
+}
+
+public struct HrpBulletinItem: Identifiable, Codable, Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let category: HrpBulletinCategory
+    public let publishedDateDisplay: String
+    public let badgeText: String?
+    public let isPinned: Bool
+    public let summary: String
+    public let contentSections: [String]
+    public let authorDisplay: String
+
+    public init(
+        id: String,
+        title: String,
+        category: HrpBulletinCategory,
+        publishedDateDisplay: String,
+        badgeText: String? = nil,
+        isPinned: Bool = false,
+        summary: String,
+        contentSections: [String],
+        authorDisplay: String = "Ban Nhân sự HRPartner"
+    ) {
+        self.id = id
+        self.title = title
+        self.category = category
+        self.publishedDateDisplay = publishedDateDisplay
+        self.badgeText = badgeText
+        self.isPinned = isPinned
+        self.summary = summary
+        self.contentSections = contentSections
+        self.authorDisplay = authorDisplay
+    }
+
+    public static let defaultMockupItems: [HrpBulletinItem] = [
+        HrpBulletinItem(
+            id: "bulletin-hr-news-2026-11-13",
+            title: "Tin nhân sự ngày 13-11-2026",
+            category: .hrNews,
+            publishedDateDisplay: "13-11-2026",
+            badgeText: "Mới",
+            isPinned: true,
+            summary: "Tổng hợp nhanh tình hình nhân sự, tiến độ tiếp nhận hồ sơ NLĐ mới và điều phối tại các KCN trọng điểm ngày 13-11-2026.",
+            contentSections: [
+                "1. Tiếp nhận & bố trí nhân sự: Các nhóm tuyển dụng hoàn tất rà soát danh sách ứng viên phỏng vấn và vào làm trong ngày 13-11-2026 tại các dự án KCN.",
+                "2. Phối hợp vận hành tại dự án: Quản lý dự án (QLDA) và chuyên viên tuyển dụng cập nhật đầy đủ trạng thái NLĐ (Đang làm / Đang chờ việc / Đã nghỉ) trước 17:00 hàng ngày.",
+                "3. Chuẩn hóa hồ sơ CCCD: Đảm bảo ảnh chụp CCCD 2 mặt rõ nét và khớp thông tin định danh khi tạo mới hồ sơ trên ứng dụng HRP BI."
+            ],
+            authorDisplay: "Ban Nhân sự & Tuyển dụng HRPartner"
+        ),
+        HrpBulletinItem(
+            id: "bulletin-holiday-vietnam-culture-day",
+            title: "Lịch nghỉ lễ ngày Văn hóa Việt Nam",
+            category: .holidaySchedule,
+            publishedDateDisplay: "13-11-2026",
+            badgeText: "Lịch nghỉ lễ",
+            isPinned: true,
+            summary: "Thông báo lịch nghỉ lễ ngày Văn hóa Việt Nam và hướng dẫn bố trí lịch trực vận hành, chấm công cho các bộ phận.",
+            contentSections: [
+                "1. Thời gian nghỉ lễ: Cán bộ nhân viên và người lao động thực hiện lịch nghỉ lễ ngày Văn hóa Việt Nam theo thông báo của Công ty và lịch điều phối tại từng dự án tiếp nhận.",
+                "2. Công tác trực vận hành & hỗ trợ NLĐ: Các nhóm tuyển dụng và QLDA chủ động phân công nhân sự trực hỗ trợ người lao động tại các KCN có dây chuyền sản xuất hoạt động trong kỳ nghỉ.",
+                "3. Chấm công & tính công ngày lễ: Dữ liệu chấm công và chế độ ngày lễ được hệ thống HRP BI ghi nhận theo quy định hiện hành."
+            ],
+            authorDisplay: "Phòng Hành chính - Nhân sự HRPartner"
+        ),
+        HrpBulletinItem(
+            id: "bulletin-ops-attendance-nov-2026",
+            title: "Hướng dẫn rà soát bảng công & giải trình chấm công tháng 11-2026",
+            category: .internalPolicy,
+            publishedDateDisplay: "10-11-2026",
+            badgeText: nil,
+            isPinned: false,
+            summary: "Nhắc lịch kiểm tra dữ liệu chấm công GPS/Wi-Fi và gửi đơn giải trình, đơn nghỉ phép trên ứng dụng trước kỳ chốt công.",
+            contentSections: [
+                "1. CBNV chủ động theo dõi lịch sử chấm công hàng ngày tại mục Chấm công trên ứng dụng HRP BI.",
+                "2. Trường hợp phát sinh công tác tại dự án hoặc quên chấm công, vui lòng tạo Giải trình chấm công hoặc Đơn nghỉ phép trực tiếp trên ứng dụng để cấp quản lý phê duyệt kịp thời."
+            ],
+            authorDisplay: "Ban Vận hành HRPartner"
+        )
+    ]
+}
+
 // MARK: - Safe Dictionary JSON Extraction Extensions
 
 public extension Dictionary where Key == String, Value == Any {
