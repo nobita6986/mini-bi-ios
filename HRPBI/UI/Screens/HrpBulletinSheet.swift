@@ -486,6 +486,7 @@ public struct HrpBulletinSheet: View {
                             HapticsManager.selection()
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
                                 selectedBulletinId = nil
+                                viewModel.selectedBulletinDetailId = nil
                             }
                         } label: {
                             HStack(spacing: 4) {
@@ -496,6 +497,7 @@ public struct HrpBulletinSheet: View {
                         }
                     } else {
                         Button("Đóng") {
+                            viewModel.selectedBulletinDetailId = nil
                             dismiss()
                         }
                     }
@@ -508,6 +510,16 @@ public struct HrpBulletinSheet: View {
                         }
                         .font(.subheadline.weight(.semibold))
                     }
+                }
+            }
+            .onAppear {
+                if let targetId = viewModel.selectedBulletinDetailId, !targetId.isEmpty {
+                    selectedBulletinId = targetId
+                }
+            }
+            .onChange(of: viewModel.selectedBulletinDetailId) { newId in
+                if let newId, !newId.isEmpty {
+                    selectedBulletinId = newId
                 }
             }
             .sheet(item: $activePdfPreview) { selection in
@@ -564,16 +576,35 @@ public struct HrpBulletinSheet: View {
                     .padding(.vertical, 2)
                 }
 
-                // Mockup Preview Notice Banner
+                // Mockup Preview Notice Banner + Test New Bulletin Notification Button
                 if !HrpBulletinContract.REMOTE_API_ENABLED {
                     HStack(alignment: .center, spacing: 8) {
                         Image(systemName: "sparkles")
                             .font(.caption.weight(.bold))
                             .foregroundColor(theme.primary)
-                        Text("Bản tin nội bộ HRPartner (dữ liệu mẫu có đính kèm Ảnh & PDF 2 trang).")
+                        Text("Bản tin nội bộ HRPartner (có đính kèm Ảnh, PDF 2 trang & báo tin mới).")
                             .font(.caption)
                             .foregroundColor(SemanticColors.textSecondary)
-                        Spacer(minLength: 0)
+                        Spacer(minLength: 4)
+                        Button {
+                            HapticsManager.selection()
+                            viewModel.triggerSampleBulletinNotification()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "bell.badge.fill")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text("Báo thử")
+                                    .font(.system(size: 11, weight: .bold))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(theme.primary)
+                            )
+                            .foregroundColor(.white)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -1123,21 +1154,23 @@ private struct HrpPdfKitRepresentableView: UIViewRepresentable {
     }
 }
 
-// MARK: - Fullscreen Pinch-to-Zoom Image Lightbox Sheet (1x - 4x Zoom + Double Tap)
+// MARK: - Fullscreen Pinch-to-Zoom Image Lightbox Sheet (1x - 4x Zoom + Double Tap + Safe-Area Header & Controls)
 
 private struct HrpBulletinImageLightboxSheet: View {
     let attachment: HrpBulletinAttachment
     let image: UIImage
     @Environment(\.dismiss) private var dismiss
+    @State private var zoomScale: CGFloat = 1.0
 
     var body: some View {
-        ZStack(alignment: .top) {
+        ZStack {
             Color.black.ignoresSafeArea()
 
-            HrpZoomableImageScrollView(image: image)
+            HrpZoomableImageScrollView(image: image, zoomScale: $zoomScale)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
+                // Safe-area respecting top header bar (never overlaps iOS clock or TestFlight indicator)
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(attachment.title)
@@ -1164,76 +1197,195 @@ private struct HrpBulletinImageLightboxSheet: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Color.black.opacity(0.65))
+                .background(Color.black.opacity(0.72))
 
                 Spacer()
+
+                // Bottom Zoom Control Pill (- / 100% / +)
+                HStack(spacing: 18) {
+                    Button {
+                        HapticsManager.selection()
+                        zoomScale = max(1.0, (zoomScale - 0.5))
+                    } label: {
+                        Image(systemName: "minus.magnifyingglass")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(zoomScale > 1.01 ? .white : Color.white.opacity(0.4))
+                            .frame(width: 36, height: 36)
+                    }
+                    .disabled(zoomScale <= 1.01)
+
+                    Button {
+                        HapticsManager.selection()
+                        zoomScale = 1.0
+                    } label: {
+                        Text("\(Int(round(zoomScale * 100)))%")
+                            .font(.caption.weight(.bold).monospacedDigit())
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color.white.opacity(0.18))
+                            )
+                    }
+
+                    Button {
+                        HapticsManager.selection()
+                        zoomScale = min(4.0, (zoomScale + 0.5))
+                    } label: {
+                        Image(systemName: "plus.magnifyingglass")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(zoomScale < 3.99 ? .white : Color.white.opacity(0.4))
+                            .frame(width: 36, height: 36)
+                    }
+                    .disabled(zoomScale >= 3.99)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.black.opacity(0.75))
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                        )
+                )
+                .padding(.bottom, 16)
             }
+        }
+    }
+}
+
+public final class HrpCenteringZoomScrollView: UIScrollView, UIScrollViewDelegate {
+    public let imageView = UIImageView()
+    public var onZoomScaleChanged: ((CGFloat) -> Void)?
+    private var lastLayoutBoundsSize: CGSize = .zero
+
+    public init(image: UIImage) {
+        super.init(frame: .zero)
+        delegate = self
+        minimumZoomScale = 1.0
+        maximumZoomScale = 4.0
+        bouncesZoom = true
+        showsHorizontalScrollIndicator = false
+        showsVerticalScrollIndicator = false
+        contentInsetAdjustmentBehavior = .never
+        backgroundColor = .black
+
+        imageView.image = image
+        imageView.contentMode = .scaleAspectFit
+        imageView.isUserInteractionEnabled = true
+        addSubview(imageView)
+
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        addGestureRecognizer(doubleTap)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        if lastLayoutBoundsSize != bounds.size {
+            lastLayoutBoundsSize = bounds.size
+            recalculateAspectFitFrameAndCenter()
+        } else {
+            centerContentWithinBounds()
+        }
+    }
+
+    public func updateImageIfNeeded(_ newImage: UIImage) {
+        if imageView.image !== newImage {
+            imageView.image = newImage
+            lastLayoutBoundsSize = .zero
+            setNeedsLayout()
+        }
+    }
+
+    public func recalculateAspectFitFrameAndCenter() {
+        guard let img = imageView.image,
+              img.size.width > 0,
+              img.size.height > 0,
+              bounds.width > 0,
+              bounds.height > 0 else {
+            return
+        }
+        zoomScale = 1.0
+        imageView.transform = .identity
+
+        let scale = min(bounds.width / img.size.width, bounds.height / img.size.height)
+        let fittedSize = CGSize(
+            width: max(1, floor(img.size.width * scale)),
+            height: max(1, floor(img.size.height * scale))
+        )
+        imageView.frame = CGRect(origin: .zero, size: fittedSize)
+        contentSize = fittedSize
+        centerContentWithinBounds()
+        contentOffset = CGPoint(x: -contentInset.left, y: -contentInset.top)
+        onZoomScaleChanged?(1.0)
+    }
+
+    public func centerContentWithinBounds() {
+        let offsetX = max((bounds.width - contentSize.width) * 0.5, 0)
+        let offsetY = max((bounds.height - contentSize.height) * 0.5, 0)
+        let targetInset = UIEdgeInsets(top: offsetY, left: offsetX, bottom: offsetY, right: offsetX)
+        if contentInset != targetInset {
+            contentInset = targetInset
+        }
+    }
+
+    public func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        imageView
+    }
+
+    public func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        centerContentWithinBounds()
+        onZoomScaleChanged?(scrollView.zoomScale)
+    }
+
+    @objc private func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+        if zoomScale > 1.05 {
+            setZoomScale(1.0, animated: true)
+        } else {
+            let targetScale: CGFloat = 2.5
+            let tapPoint = recognizer.location(in: imageView)
+            let zoomWidth = imageView.bounds.width / targetScale
+            let zoomHeight = imageView.bounds.height / targetScale
+            let zoomRect = CGRect(
+                x: tapPoint.x - (zoomWidth * 0.5),
+                y: tapPoint.y - (zoomHeight * 0.5),
+                width: zoomWidth,
+                height: zoomHeight
+            )
+            zoom(to: zoomRect, animated: true)
         }
     }
 }
 
 private struct HrpZoomableImageScrollView: UIViewRepresentable {
     let image: UIImage
+    @Binding var zoomScale: CGFloat
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
-        scrollView.delegate = context.coordinator
-        scrollView.minimumZoomScale = 1.0
-        scrollView.maximumZoomScale = 4.0
-        scrollView.bouncesZoom = true
-        scrollView.showsHorizontalScrollIndicator = false
-        scrollView.showsVerticalScrollIndicator = false
-        scrollView.backgroundColor = .black
-
-        let imageView = UIImageView(image: image)
-        imageView.contentMode = .scaleAspectFit
-        imageView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.addSubview(imageView)
-        context.coordinator.imageView = imageView
-
-        NSLayoutConstraint.activate([
-            imageView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
-            imageView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor),
-            imageView.centerXAnchor.constraint(equalTo: scrollView.contentLayoutGuide.centerXAnchor),
-            imageView.centerYAnchor.constraint(equalTo: scrollView.contentLayoutGuide.centerYAnchor)
-        ])
-
-        let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
-        doubleTap.numberOfTapsRequired = 2
-        scrollView.addGestureRecognizer(doubleTap)
-
+    func makeUIView(context: Context) -> HrpCenteringZoomScrollView {
+        let scrollView = HrpCenteringZoomScrollView(image: image)
+        scrollView.onZoomScaleChanged = { newScale in
+            DispatchQueue.main.async {
+                if abs(self.zoomScale - newScale) > 0.01 {
+                    self.zoomScale = newScale
+                }
+            }
+        }
         return scrollView
     }
 
-    func updateUIView(_ uiView: UIScrollView, context: Context) {
-        context.coordinator.imageView?.image = image
-    }
-
-    final class Coordinator: NSObject, UIScrollViewDelegate {
-        weak var imageView: UIImageView?
-
-        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            imageView
-        }
-
-        @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
-            guard let scrollView = recognizer.view as? UIScrollView else { return }
-            if scrollView.zoomScale > 1.01 {
-                scrollView.setZoomScale(1.0, animated: true)
-            } else {
-                let point = recognizer.location(in: imageView)
-                let zoomRect = CGRect(
-                    x: point.x - 80,
-                    y: point.y - 80,
-                    width: 160,
-                    height: 160
-                )
-                scrollView.zoom(to: zoomRect, animated: true)
-            }
+    func updateUIView(_ uiView: HrpCenteringZoomScrollView, context: Context) {
+        uiView.updateImageIfNeeded(image)
+        if abs(uiView.zoomScale - zoomScale) > 0.02 {
+            uiView.setZoomScale(min(max(zoomScale, 1.0), 4.0), animated: true)
         }
     }
 }

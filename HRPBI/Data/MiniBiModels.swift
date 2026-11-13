@@ -2992,6 +2992,8 @@ public enum HrpBulletinContract {
     /// Locked false while waiting for T0-BI to open `/api/bulletins` on Backend.
     public static let REMOTE_API_ENABLED: Bool = false
     public static let readBulletinIdsStorageKey: String = "hrpbi.bulletin.read_ids.v1"
+    public static let notifiedBulletinIdsStorageKey: String = "hrpbi.bulletin.notified_ids.v1"
+    public static let notificationRequestPrefix: String = "hrp_bulletin_new_"
 
     public static func buildListPath(
         category: HrpBulletinCategory = .all,

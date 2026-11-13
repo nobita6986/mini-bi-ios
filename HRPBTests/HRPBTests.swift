@@ -5749,6 +5749,17 @@ final class HRPBTests: XCTestCase {
         XCTAssertGreaterThan(generatedImg.size.width, 0)
         XCTAssertGreaterThan(generatedImg.size.height, 0)
 
+        // Verify HrpCenteringZoomScrollView aspect-fit centering (no top-left clipping at 1x or 2x zoom)
+        let zoomScroll = HrpCenteringZoomScrollView(image: generatedImg)
+        zoomScroll.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        zoomScroll.layoutSubviews()
+        XCTAssertEqual(zoomScroll.imageView.frame.origin, .zero)
+        XCTAssertEqual(zoomScroll.imageView.frame.width, 390, accuracy: 1.0)
+        XCTAssertGreaterThan(zoomScroll.contentInset.top, 200)
+        zoomScroll.setZoomScale(2.0, animated: false)
+        zoomScroll.scrollViewDidZoom(zoomScroll)
+        XCTAssertEqual(zoomScroll.contentSize.width, 780, accuracy: 2.0)
+
         let pdfAtt = try XCTUnwrap(hrBulletin.pdfAttachments.first)
         let pdfUrl = try XCTUnwrap(HrpBulletinMockupMediaGenerator.samplePdfUrl(for: pdfAtt, bulletin: hrBulletin))
         let pdfDoc = try XCTUnwrap(PDFDocument(url: pdfUrl))
@@ -5758,8 +5769,15 @@ final class HRPBTests: XCTestCase {
         XCTAssertEqual(vm.filteredBulletinItems.count, 1)
         XCTAssertEqual(vm.filteredBulletinItems.first?.title, "Lịch nghỉ lễ ngày Văn hóa Việt Nam")
 
-        // Verify local isRead persistence across ViewModel instances
-        vm.markBulletinRead("bulletin-hr-news-2026-11-13")
+        // Verify local isRead & notification announcement persistence across ViewModel instances
+        let unannounced = vm.notifyUnannouncedBulletinsIfNeeded(postSystemNotification: false)
+        XCTAssertEqual(unannounced.count, 3)
+        // Second call returns empty because all 3 have now been announced
+        XCTAssertTrue(vm.notifyUnannouncedBulletinsIfNeeded(postSystemNotification: false).isEmpty)
+
+        vm.openBulletinFromNotification(bulletinId: "bulletin-hr-news-2026-11-13")
+        XCTAssertTrue(vm.isBulletinSheetPresented)
+        XCTAssertEqual(vm.selectedBulletinDetailId, "bulletin-hr-news-2026-11-13")
         XCTAssertEqual(vm.unreadBulletinCount, 2)
         XCTAssertEqual(vm.bulletinItems.first(where: { $0.id == "bulletin-hr-news-2026-11-13" })?.isRead, true)
 
