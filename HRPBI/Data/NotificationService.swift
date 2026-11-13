@@ -453,6 +453,7 @@ public final class MiniBiRepository {
         guard response.isSuccess, let root = response.jsonObject else {
             var copy = user
             copy.allowedWorkerTabs = []
+            copy.scopes = []
             return copy
         }
         let resolvedTabs = Self.parseDirectEntrySessionAllowedWorkerTabs(
@@ -464,9 +465,10 @@ public final class MiniBiRepository {
         if let actorObj = root["actor"] as? [String: Any] {
             let sessionUserId = actorObj.optString("app_user_id").trimmingCharacters(in: .whitespacesAndNewlines)
             if sessionUserId.caseInsensitiveCompare(cleanUserId) == .orderedSame {
-                let sessionScopes = Self.parseActorScopes(actorObj["scopes"])
-                if !sessionScopes.isEmpty {
-                    copy.scopes = sessionScopes
+                if actorObj["scopes"] != nil {
+                    copy.scopes = Self.parseActorScopes(actorObj["scopes"])
+                } else if resolvedTabs.isEmpty {
+                    copy.scopes = []
                 }
                 if let suggestion = actorObj.optNullableString("self_recruiter_suggestion"), !suggestion.isEmpty {
                     copy.selfRecruiterSuggestion = suggestion

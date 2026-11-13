@@ -189,38 +189,61 @@ public struct DashboardScreen: View {
         .redacted(reason: .placeholder)
     }
 
-    // MARK: - Date Filter Bar (Full-Width Period Chips)
+    // MARK: - Date Filter Bar (Full-Width Period Chips + Refresh Button)
 
     private var dateAndScopeFilterBar: some View {
         let theme = viewModel.selectedTheme
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(DateFilterPreset.allCases) { preset in
-                    let selected = viewModel.selectedDatePreset == preset
-                    Button {
-                        KeyboardDismissal.dismiss()
-                        HapticsManager.selection()
-                        viewModel.applyDatePreset(preset, reload: true)
-                    } label: {
-                        Text(preset.titleVi)
-                            .font(.caption.weight(selected ? .bold : .medium))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .frame(minHeight: 32)
-                            .background(selected ? theme.primaryLight : SemanticColors.surfaceMuted)
-                            .foregroundColor(selected ? theme.primary : SemanticColors.textSecondary)
-                            .overlay(
-                                Capsule()
-                                    .stroke(selected ? theme.primary.opacity(0.35) : Color.clear, lineWidth: 1)
-                            )
-                            .clipShape(Capsule())
-                            .contentShape(Capsule())
+        return HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(DateFilterPreset.allCases) { preset in
+                        let selected = viewModel.selectedDatePreset == preset
+                        Button {
+                            KeyboardDismissal.dismiss()
+                            HapticsManager.selection()
+                            viewModel.applyDatePreset(preset, reload: true)
+                        } label: {
+                            Text(preset.titleVi)
+                                .font(.caption.weight(selected ? .bold : .medium))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .frame(minHeight: 32)
+                                .background(selected ? theme.primaryLight : Color.white)
+                                .foregroundColor(selected ? theme.primary : SemanticColors.textPrimary)
+                                .overlay(
+                                    Capsule()
+                                        .stroke(selected ? theme.primary.opacity(0.45) : SemanticColors.borderSubtle, lineWidth: 1)
+                                )
+                                .clipShape(Capsule())
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 14)
+
+            Button {
+                KeyboardDismissal.dismiss()
+                HapticsManager.lightImpact()
+                viewModel.resetDashboardDisplayForFilterChange()
+                Task { await viewModel.loadDashboardData(includeCccdTabs: false, force: true) }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(theme.primary)
+                    .frame(width: 32, height: 32)
+                    .background(Color.white)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(SemanticColors.borderSubtle, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Làm mới báo cáo")
         }
+        .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(Color.white)
     }
@@ -229,11 +252,17 @@ public struct DashboardScreen: View {
 
     @ViewBuilder
     private func overviewSection(theme: MiniBiThemePalette) -> some View {
-        let snapshot = viewModel.generalOverviewSnapshot ?? fallbackOverviewSnapshotFromLegacy()
-        GeneralOverviewSection(
-            snapshot: snapshot,
-            theme: theme
-        )
+        if let snapshot = viewModel.generalOverviewSnapshot {
+            GeneralOverviewSection(
+                snapshot: snapshot,
+                theme: theme
+            )
+        } else if viewModel.dashboardErrorMessage.isEmpty {
+            GeneralOverviewSection(
+                snapshot: fallbackOverviewSnapshotFromLegacy(),
+                theme: theme
+            )
+        }
     }
 
     private func fallbackOverviewSnapshotFromLegacy() -> GeneralOverviewSnapshot {
@@ -242,14 +271,19 @@ public struct DashboardScreen: View {
         let workingRate: Double? = kpis.totalHeadcount > 0
             ? (Double(kpis.activeCount) * 100.0 / Double(kpis.totalHeadcount))
             : nil
+        let isAllScope = viewModel.currentUser?.hasScopeKind("all") == true
+        let hasTeamScope = viewModel.currentUser?.hasScopeKind("team") == true
+        let defaultScopeDesc = isAllScope
+            ? "Toàn hệ thống"
+            : (hasTeamScope ? "Nhóm phụ trách" : "Cá nhân & dự án phụ trách")
         return GeneralOverviewSnapshot(
             asOfDate: LeaveContract.todayVietnamIsoDate(),
-            scopeDescription: "Toàn hệ thống",
+            scopeDescription: defaultScopeDesc,
             totalProfiles: kpis.totalHeadcount,
             workingCount: kpis.activeCount,
             waitingCount: kpis.interviewCount,
             leftCount: kpis.inactiveCount,
-            audienceKind: "all",
+            audienceKind: isAllScope ? "all" : (hasTeamScope ? "team" : "own"),
             isPeriodFiltered: isPeriodFiltered,
             workingRatePct: workingRate,
             projectCount: max(viewModel.generalOverview.projectsTotal, viewModel.generalOverview.projects.count),
@@ -264,17 +298,22 @@ public struct DashboardScreen: View {
     @ViewBuilder
     private func teamReportSection(theme: MiniBiThemePalette) -> some View {
         if !viewModel.canViewTeamReport {
-            VStack(spacing: 10) {
-                Image(systemName: "person.2.slash.fill")
-                    .font(.title2)
-                    .foregroundColor(SemanticColors.textMuted)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.body.weight(.semibold))
+                        .foregroundColor(theme.primary)
+                    Text("Báo cáo theo nhóm")
+                        .font(.headline)
+                        .foregroundColor(SemanticColors.textPrimary)
+                }
                 Text("Tài khoản hiện tại không quản lý nhóm tuyển dụng. Vui lòng xem số liệu cá nhân tại tab Tổng quát.")
                     .font(.subheadline)
-                    .multilineTextAlignment(.center)
                     .foregroundColor(SemanticColors.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity)
-            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
             .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
         } else {
             VStack(alignment: .leading, spacing: 14) {
@@ -399,18 +438,20 @@ private struct GeneralOverviewSection: View {
     }
 
     private var nonPeriodTotalSubtitle: String {
-        var scopeParts: [String] = []
-        if let teamTotal = snapshot.teamTotal {
-            scopeParts.append("Nhóm: \(teamTotal)")
-        }
-        if let managedTotal = snapshot.managedTotal {
-            scopeParts.append("QLDA: \(managedTotal)")
-        }
-        if let recruitedTotal = snapshot.recruitedTotal {
-            scopeParts.append("Tôi tuyển: \(recruitedTotal)")
-        }
-        if !scopeParts.isEmpty {
-            return scopeParts.joined(separator: " · ")
+        if snapshot.totalProfiles > 0 {
+            var scopeParts: [String] = []
+            if let teamTotal = snapshot.teamTotal {
+                scopeParts.append("Nhóm: \(teamTotal)")
+            }
+            if let managedTotal = snapshot.managedTotal {
+                scopeParts.append("QLDA: \(managedTotal)")
+            }
+            if let recruitedTotal = snapshot.recruitedTotal {
+                scopeParts.append("Tôi tuyển: \(recruitedTotal)")
+            }
+            if !scopeParts.isEmpty {
+                return scopeParts.joined(separator: " · ")
+            }
         }
         return "\(snapshot.projectCount) dự án · \(snapshot.recruiterCount) người tuyển"
     }
@@ -434,13 +475,13 @@ private struct GeneralOverviewSection: View {
                     if snapshot.isPeriodFiltered && snapshot.audienceKind == "all" {
                         overviewMetricTile(
                             label: "TUYỂN MỚI TRONG KỲ",
-                            value: "\(snapshot.totalProfiles) NLĐ",
+                            countValue: snapshot.totalProfiles,
                             subtitle: "\(snapshot.projectCount) dự án · \(snapshot.recruiterCount) người tuyển",
                             accentColor: theme.primary
                         )
                         overviewMetricTile(
                             label: "VÀO LÀM TRONG KỲ",
-                            value: "\(snapshot.workingCount) NLĐ",
+                            countValue: snapshot.workingCount,
                             subtitle: {
                                 let closingW = snapshot.closingWorkingCount ?? snapshot.workingCount
                                 let rateStr = DashboardFormatters.formatPct(snapshot.workingRatePct)
@@ -450,52 +491,55 @@ private struct GeneralOverviewSection: View {
                         )
                         overviewMetricTile(
                             label: "CHỜ VIỆC TRONG KỲ",
-                            value: "\(snapshot.waitingCount) NLĐ",
+                            countValue: snapshot.waitingCount,
                             subtitle: "Chờ việc cuối kỳ: \(snapshot.closingWaitingCount ?? snapshot.waitingCount) NLĐ",
-                            accentColor: SemanticColors.warningText
+                            accentColor: SemanticColors.infoText
                         )
                         overviewMetricTile(
                             label: "NGHỈ VIỆC TRONG KỲ",
-                            value: "\(snapshot.leftCount) NLĐ",
+                            countValue: snapshot.leftCount,
                             subtitle: {
                                 let net = snapshot.periodNetOnChange ?? (snapshot.workingCount - snapshot.leftCount)
                                 return "Biến động đang làm: \(DashboardFormatters.formatSigned(net)) NLĐ"
                             }(),
-                            accentColor: SemanticColors.dangerText
+                            accentColor: SemanticColors.warningText
                         )
                     } else {
                         overviewMetricTile(
                             label: "TỔNG HỒ SƠ",
-                            value: "\(snapshot.totalProfiles) NLĐ",
+                            countValue: snapshot.totalProfiles,
                             subtitle: nonPeriodTotalSubtitle,
                             accentColor: theme.primary
                         )
                         overviewMetricTile(
                             label: "ĐANG LÀM",
-                            value: "\(snapshot.workingCount) NLĐ",
-                            subtitle: "Tỷ lệ đang làm: \(DashboardFormatters.formatPct(snapshot.workingRatePct))",
+                            countValue: snapshot.workingCount,
+                            subtitle: snapshot.workingRatePct != nil
+                                ? "Tỷ lệ đang làm: \(DashboardFormatters.formatPct(snapshot.workingRatePct))"
+                                : "Đang làm việc thực tế",
                             accentColor: SemanticColors.successText,
-                            badgePill: true
+                            badgePill: snapshot.workingRatePct != nil
                         )
                         overviewMetricTile(
                             label: "ĐANG CHỜ VIỆC",
-                            value: "\(snapshot.waitingCount) NLĐ",
+                            countValue: snapshot.waitingCount,
                             subtitle: "\(snapshot.projectCount) dự án có nhân sự",
-                            accentColor: SemanticColors.warningText
+                            accentColor: SemanticColors.infoText
                         )
                         overviewMetricTile(
                             label: "ĐÃ NGHỈ",
-                            value: "\(snapshot.leftCount) NLĐ",
+                            countValue: snapshot.leftCount,
                             subtitle: snapshot.retention7dPct != nil
                                 ? "Giữ chân 7 ngày: \(DashboardFormatters.formatPct(snapshot.retention7dPct))"
-                                : "\(snapshot.recruiterCount) người tuyển",
-                            accentColor: SemanticColors.dangerText
+                                : "\(snapshot.recruiterCount) người tuyển phụ trách",
+                            accentColor: SemanticColors.warningText
                         )
                     }
                 }
 
-                // Period Balance Banner when periodNewEpisodes is present on non-all/general view
+                // Period Balance Banner when periodNewEpisodes is present on non-all/general view and totalProfiles > 0
                 if !(snapshot.isPeriodFiltered && snapshot.audienceKind == "all"),
+                   snapshot.totalProfiles > 0 || snapshot.audienceKind == "all",
                    let newEp = snapshot.periodNewEpisodes {
                     let fromVi = DashboardFormatters.formatDateVi(snapshot.periodFromDate)
                     let toVi = DashboardFormatters.formatDateVi(snapshot.periodToDate)
@@ -527,6 +571,14 @@ private struct GeneralOverviewSection: View {
                         peakDateIso: snapshot.peakDateIso,
                         theme: theme
                     )
+                }
+
+                // Empty state notice when 0 profiles in current scope (matches Android 100%)
+                if snapshot.totalProfiles == 0 {
+                    Text("Chưa có hồ sơ người lao động nào được ghi nhận trong phạm vi hiện tại.")
+                        .font(.subheadline)
+                        .foregroundColor(SemanticColors.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(14)
@@ -580,22 +632,33 @@ private struct GeneralOverviewSection: View {
 
     private func overviewMetricTile(
         label: String,
-        value: String,
+        countValue: Int,
         subtitle: String,
         accentColor: Color,
         badgePill: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
-                .font(.caption2.weight(.bold))
-                .foregroundColor(SemanticColors.textSecondary)
-                .lineLimit(1)
-            Text(value)
-                .font(.system(size: 22, weight: .heavy, design: .rounded))
-                .monospacedDigit()
-                .contentTransition(.numericText())
-                .foregroundColor(accentColor)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accentColor)
+                    .frame(width: 7, height: 7)
+                Text(label)
+                    .font(.caption2.weight(.bold))
+                    .foregroundColor(SemanticColors.textSecondary)
+                    .lineLimit(1)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("\(countValue)")
+                    .font(.system(size: 24, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .foregroundColor(SemanticColors.textPrimary)
+                    .lineLimit(1)
+                Text("NLĐ")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundColor(accentColor)
+                    .lineLimit(1)
+            }
             if badgePill {
                 Text(subtitle)
                     .font(.caption2.weight(.semibold))
@@ -610,11 +673,11 @@ private struct GeneralOverviewSection: View {
                 Text(subtitle)
                     .font(.caption2.weight(.medium))
                     .monospacedDigit()
-                    .foregroundColor(SemanticColors.textMuted)
+                    .foregroundColor(SemanticColors.textSecondary)
                     .lineLimit(2)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 86, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 88, alignment: .topLeading)
         .padding(12)
         .hrpMutedTile(cornerRadius: HrpDesignTokens.radiusMD)
     }

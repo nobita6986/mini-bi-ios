@@ -5685,6 +5685,24 @@ final class HRPBTests: XCTestCase {
         await vm.loadDashboardData(force: true)
         XCTAssertFalse(vm.canViewTeamReport)
         XCTAssertEqual(vm.generalOverviewSnapshot?.audienceKind, "own")
+        XCTAssertEqual(vm.generalOverviewSnapshot?.scopeDescription, "Cá nhân & dự án phụ trách")
+        XCTAssertNil(vm.selectedTeamReport)
+
+        // Non-recruitment account (e.g., Accounting / Marketing like Tạ Thị Thu Nga with no worker scopes)
+        vm.currentUser = MiniBiUser(
+            id: "dddd1111-2222-4333-8444-555555555555",
+            username: "nga.ttt",
+            fullName: "Tạ Thị Thu Nga",
+            permissions: [],
+            allowedWorkerTabs: [],
+            scopes: []
+        )
+        await vm.loadDashboardData(force: true)
+        XCTAssertEqual(vm.dashboardErrorMessage, "")
+        XCTAssertFalse(vm.canViewTeamReport)
+        XCTAssertEqual(vm.generalOverviewSnapshot?.audienceKind, "own")
+        XCTAssertEqual(vm.generalOverviewSnapshot?.scopeDescription, "Cá nhân & dự án phụ trách")
+        XCTAssertEqual(vm.generalOverviewSnapshot?.totalProfiles, 0)
         XCTAssertNil(vm.selectedTeamReport)
     }
 }
