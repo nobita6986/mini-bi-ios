@@ -5710,8 +5710,8 @@ final class HRPBTests: XCTestCase {
     func testRound9_HrpBulletinMockupItemsAndCategoryFilter() throws {
         XCTAssertFalse(HrpBulletinContract.REMOTE_API_ENABLED)
         XCTAssertEqual(
-            HrpBulletinContract.buildListPath(category: .hrNews, page: 1, limit: 20),
-            "/api/bulletins?page=1&limit=20&category=HR_NEWS"
+            HrpBulletinContract.buildListPath(category: .hrNews, pageSize: 20, cursor: "cur_1"),
+            "/api/bulletins?category=HR_NEWS&page_size=20&cursor=cur_1"
         )
         XCTAssertEqual(
             HrpBulletinContract.buildDetailPath(bulletinId: "bul_20261113_001"),
@@ -5771,16 +5771,16 @@ final class HRPBTests: XCTestCase {
         XCTAssertEqual(vmReloaded.unreadBulletinCount, 0)
 
         // Verify /api/bulletins JSON contract parser
-        let parsedContractBulletin = HrpBulletinContract.parseBulletinItem([
+        let parsedContractBulletin = try XCTUnwrap(HrpBulletinContract.parseBulletinItem([
             "id": "bul_20261113_999",
             "category": "HOLIDAY_SCHEDULE",
             "category_display": "Lịch nghỉ lễ",
             "title": "Lịch nghỉ lễ ngày Văn hóa Việt Nam",
             "summary": "Tóm tắt bản tin nghỉ lễ",
-            "body_paragraphs": ["Đoạn 1", "Đoạn 2"],
+            "content_sections": ["Đoạn 1", "Đoạn 2"],
             "published_at": "2026-11-13T08:00:00Z",
             "published_date_display": "13-11-2026",
-            "author_department": "Phòng HCNS",
+            "author_display": "Phòng HCNS",
             "is_pinned": true,
             "is_read": false,
             "attachment_summary": [
@@ -5811,7 +5811,7 @@ final class HRPBTests: XCTestCase {
                     "page_count": 2
                 ]
             ]
-        ])
+        ]))
         XCTAssertEqual(parsedContractBulletin.id, "bul_20261113_999")
         XCTAssertEqual(parsedContractBulletin.category, .holidaySchedule)
         XCTAssertEqual(parsedContractBulletin.imageAttachments.count, 1)
