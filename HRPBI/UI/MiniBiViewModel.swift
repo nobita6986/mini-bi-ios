@@ -1228,6 +1228,7 @@ public final class MiniBiViewModel: ObservableObject {
 
             let user = self.currentUser
             let hasAllScope = user?.hasScopeKind("all") == true
+            var shouldLoadScopedFallback = !hasAllScope
 
             if hasAllScope {
                 self.canViewTeamReport = true
@@ -1275,10 +1276,16 @@ public final class MiniBiViewModel: ObservableObject {
                     } else {
                         self.selectedTeamReport = nil
                     }
-                case .failure(let message, _, _, _):
-                    self.dashboardErrorMessage = message
+                case .failure(let message, let httpStatus, _, _):
+                    if httpStatus == 403 && user != nil {
+                        shouldLoadScopedFallback = true
+                    } else {
+                        self.dashboardErrorMessage = message
+                    }
                 }
-            } else if let user {
+            }
+
+            if shouldLoadScopedFallback, let user {
                 let scopedRes = await self.workReportsService.fetchScopedDashboardSnapshots(
                     user: user,
                     startDate: targetStart,

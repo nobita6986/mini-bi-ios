@@ -2556,7 +2556,7 @@ public final class WorkReportsAndReportingService {
         let placementRatePct: Double? = total > 0 ? (Double(working + left) * 100.0 / Double(total)) : nil
 
         return GeneralOverviewSnapshot(
-            asOfDate: "",
+            asOfDate: LeaveContract.todayVietnamIsoDate(),
             scopeDescription: scopeDescription,
             totalProfiles: total,
             workingCount: working,
@@ -3061,6 +3061,10 @@ public final class WorkReportsAndReportingService {
                     }
                     cursor = nextCur.isEmpty ? nil : nextCur
                 case .failure(let message, let httpStatus, let errorCode, _):
+                    if httpStatus == 403 {
+                        anyStatusCode = 200
+                        break pageLoop
+                    }
                     if firstError == nil {
                         firstError = (message, httpStatus ?? 0, errorCode)
                     }
@@ -3097,13 +3101,7 @@ public final class WorkReportsAndReportingService {
         let managedTotal: Int? = allowedSet.contains("managed") ? (rowsByScope["managed"]?.count ?? 0) : nil
         let recruitedTotal: Int? = allowedSet.contains("recruited") ? (rowsByScope["recruited"]?.count ?? 0) : nil
         let audienceKind = hasTeamScope ? "team" : "own"
-        let scopeDesc: String = {
-            let base = hasTeamScope ? "Phạm vi nhóm phụ trách" : "Phạm vi cá nhân (dự án quản lý & tự tuyển)"
-            if isPeriodFiltered {
-                return "\(base) · Kỳ \(cleanStart) → \(cleanEnd)"
-            }
-            return base
-        }()
+        let scopeDesc = hasTeamScope ? "Nhóm phụ trách" : "Cá nhân & dự án phụ trách"
 
         let snapshot = Self.buildGeneralOverviewSnapshotFromWorkers(
             workers: combinedWorkers,

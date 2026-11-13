@@ -512,7 +512,7 @@ public enum DateFilterPreset: String, CaseIterable, Identifiable, Equatable, Sen
     public var titleVi: String {
         switch self {
         case .all:
-            return "Toàn thời gian"
+            return "Tất cả"
         case .thisWeek:
             return "Tuần này"
         case .thisMonth:
