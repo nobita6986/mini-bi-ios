@@ -2649,13 +2649,21 @@ public struct AppNotificationItem: Identifiable, Equatable, Sendable {
     }
 }
 
-// MARK: - HRPartner Bulletin (Bản tin HRPartner) Models
+// MARK: - HRPartner Bulletin (Bản tin HRPartner) Models & Data Contract (/api/bulletins)
 
 public enum HrpBulletinCategory: String, CaseIterable, Identifiable, Codable, Equatable, Sendable {
     case all = "ALL"
     case hrNews = "HR_NEWS"
     case holidaySchedule = "HOLIDAY_SCHEDULE"
     case internalPolicy = "INTERNAL_POLICY"
+    case general = "GENERAL"
+
+    public static let filterCases: [HrpBulletinCategory] = [
+        .all,
+        .hrNews,
+        .holidaySchedule,
+        .internalPolicy
+    ]
 
     public var id: String { rawValue }
 
@@ -2669,6 +2677,8 @@ public enum HrpBulletinCategory: String, CaseIterable, Identifiable, Codable, Eq
             return "Lịch nghỉ lễ"
         case .internalPolicy:
             return "Vận hành"
+        case .general:
+            return "Thông báo chung"
         }
     }
 
@@ -2682,7 +2692,119 @@ public enum HrpBulletinCategory: String, CaseIterable, Identifiable, Codable, Eq
             return "calendar.badge.clock"
         case .internalPolicy:
             return "checkmark.shield.fill"
+        case .general:
+            return "megaphone.fill"
         }
+    }
+
+    public static func fromRaw(_ raw: String?) -> HrpBulletinCategory {
+        guard let normalized = raw?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+              !normalized.isEmpty else {
+            return .hrNews
+        }
+        return HrpBulletinCategory(rawValue: normalized) ?? .general
+    }
+}
+
+public enum HrpBulletinAttachmentKind: String, Codable, Equatable, Sendable {
+    case image = "IMAGE"
+    case pdf = "PDF"
+
+    public static func fromRaw(_ raw: String?, mimeType: String? = nil) -> HrpBulletinAttachmentKind {
+        let upper = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if upper == "PDF" { return .pdf }
+        if upper == "IMAGE" { return .image }
+        let mimeLower = (mimeType ?? "").lowercased()
+        if mimeLower.contains("pdf") { return .pdf }
+        return .image
+    }
+}
+
+public struct HrpBulletinAttachmentSummary: Codable, Equatable, Sendable {
+    public let imageCount: Int
+    public let pdfCount: Int
+
+    public init(imageCount: Int = 0, pdfCount: Int = 0) {
+        self.imageCount = max(0, imageCount)
+        self.pdfCount = max(0, pdfCount)
+    }
+
+    public var hasAttachments: Bool {
+        imageCount > 0 || pdfCount > 0
+    }
+}
+
+public struct HrpBulletinAttachment: Identifiable, Codable, Equatable, Sendable {
+    public let id: String
+    public let kind: HrpBulletinAttachmentKind
+    public let fileName: String
+    public let title: String
+    public let mimeType: String
+    public let fileSizeBytes: Int
+    public let url: String
+    public let thumbnailUrl: String?
+    public let width: Int?
+    public let height: Int?
+    public let pageCount: Int?
+    public let sha256: String?
+
+    public init(
+        id: String,
+        kind: HrpBulletinAttachmentKind,
+        fileName: String,
+        title: String,
+        mimeType: String,
+        fileSizeBytes: Int = 0,
+        url: String = "",
+        thumbnailUrl: String? = nil,
+        width: Int? = nil,
+        height: Int? = nil,
+        pageCount: Int? = nil,
+        sha256: String? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.fileName = fileName
+        self.title = title
+        self.mimeType = mimeType
+        self.fileSizeBytes = max(0, fileSizeBytes)
+        self.url = url
+        self.thumbnailUrl = thumbnailUrl
+        self.width = width
+        self.height = height
+        self.pageCount = pageCount
+        self.sha256 = sha256
+    }
+
+    public var formattedFileSize: String {
+        guard fileSizeBytes > 0 else { return "" }
+        if fileSizeBytes >= 1_048_576 {
+            let mb = Double(fileSizeBytes) / 1_048_576.0
+            return String(format: "%.1f MB", mb)
+        }
+        let kb = max(1, Int(round(Double(fileSizeBytes) / 1024.0)))
+        return "\(kb) KB"
+    }
+
+    public var metadataSubtitle: String {
+        var parts: [String] = []
+        switch kind {
+        case .pdf:
+            parts.append("PDF")
+            if let pages = pageCount, pages > 0 {
+                parts.append("\(pages) trang")
+            }
+        case .image:
+            parts.append("Hình ảnh")
+            if let w = width, let h = height, w > 0, h > 0 {
+                parts.append("\(w)×\(h)")
+            }
+        }
+        let sizeText = formattedFileSize
+        if !sizeText.isEmpty {
+            parts.append(sizeText)
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -2690,33 +2812,64 @@ public struct HrpBulletinItem: Identifiable, Codable, Equatable, Sendable {
     public let id: String
     public let title: String
     public let category: HrpBulletinCategory
+    public let categoryDisplay: String
+    public let publishedAt: String
     public let publishedDateDisplay: String
     public let badgeText: String?
     public let isPinned: Bool
+    public var isRead: Bool
     public let summary: String
     public let contentSections: [String]
     public let authorDisplay: String
+    public let attachmentSummary: HrpBulletinAttachmentSummary
+    public let attachments: [HrpBulletinAttachment]
 
     public init(
         id: String,
         title: String,
         category: HrpBulletinCategory,
+        categoryDisplay: String? = nil,
+        publishedAt: String = "2026-11-13T08:00:00Z",
         publishedDateDisplay: String,
         badgeText: String? = nil,
         isPinned: Bool = false,
+        isRead: Bool = false,
         summary: String,
         contentSections: [String],
-        authorDisplay: String = "Ban Nhân sự HRPartner"
+        authorDisplay: String = "Ban Nhân sự HRPartner",
+        attachmentSummary: HrpBulletinAttachmentSummary? = nil,
+        attachments: [HrpBulletinAttachment] = []
     ) {
         self.id = id
         self.title = title
         self.category = category
+        self.categoryDisplay = (categoryDisplay?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? categoryDisplay!
+            : category.titleVi
+        self.publishedAt = publishedAt
         self.publishedDateDisplay = publishedDateDisplay
         self.badgeText = badgeText
         self.isPinned = isPinned
+        self.isRead = isRead
         self.summary = summary
         self.contentSections = contentSections
         self.authorDisplay = authorDisplay
+        self.attachments = attachments
+        if let explicitSummary = attachmentSummary {
+            self.attachmentSummary = explicitSummary
+        } else {
+            let imgCount = attachments.filter { $0.kind == .image }.count
+            let pdfCount = attachments.filter { $0.kind == .pdf }.count
+            self.attachmentSummary = HrpBulletinAttachmentSummary(imageCount: imgCount, pdfCount: pdfCount)
+        }
+    }
+
+    public var imageAttachments: [HrpBulletinAttachment] {
+        attachments.filter { $0.kind == .image }
+    }
+
+    public var pdfAttachments: [HrpBulletinAttachment] {
+        attachments.filter { $0.kind == .pdf }
     }
 
     public static let defaultMockupItems: [HrpBulletinItem] = [
@@ -2724,47 +2877,214 @@ public struct HrpBulletinItem: Identifiable, Codable, Equatable, Sendable {
             id: "bulletin-hr-news-2026-11-13",
             title: "Tin nhân sự ngày 13-11-2026",
             category: .hrNews,
+            publishedAt: "2026-11-13T08:00:00Z",
             publishedDateDisplay: "13-11-2026",
             badgeText: "Mới",
             isPinned: true,
+            isRead: false,
             summary: "Tổng hợp nhanh tình hình nhân sự, tiến độ tiếp nhận hồ sơ NLĐ mới và điều phối tại các KCN trọng điểm ngày 13-11-2026.",
             contentSections: [
-                "1. Tiếp nhận & bố trí nhân sự: Các nhóm tuyển dụng hoàn tất rà soát danh sách ứng viên phỏng vấn và vào làm trong ngày 13-11-2026 tại các dự án KCN.",
+                "1. Tiếp nhận & bố trí nhân sự: Các nhóm tuyển dụng hoàn tất rà soát danh sách ứng viên phỏng vấn và vào làm trong ngày 13-11-2026 tại các dự án KCN Bá Thiện, Bình Xuyên, Phú Hà và Cẩm Khê.",
                 "2. Phối hợp vận hành tại dự án: Quản lý dự án (QLDA) và chuyên viên tuyển dụng cập nhật đầy đủ trạng thái NLĐ (Đang làm / Đang chờ việc / Đã nghỉ) trước 17:00 hàng ngày.",
                 "3. Chuẩn hóa hồ sơ CCCD: Đảm bảo ảnh chụp CCCD 2 mặt rõ nét và khớp thông tin định danh khi tạo mới hồ sơ trên ứng dụng HRP BI."
             ],
-            authorDisplay: "Ban Nhân sự & Tuyển dụng HRPartner"
+            authorDisplay: "Ban Nhân sự & Tuyển dụng HRPartner",
+            attachments: [
+                HrpBulletinAttachment(
+                    id: "att-img-hr-news-2026-11-13-1",
+                    kind: .image,
+                    fileName: "so-do-dieu-phoi-kcn-13-11-2026.jpg",
+                    title: "Bảng tổng hợp điều phối nhân sự các KCN ngày 13-11-2026",
+                    mimeType: "image/jpeg",
+                    fileSizeBytes: 245_760,
+                    url: "/api/bulletins/bulletin-hr-news-2026-11-13/attachments/att-img-hr-news-2026-11-13-1/content",
+                    thumbnailUrl: "/api/bulletins/bulletin-hr-news-2026-11-13/attachments/att-img-hr-news-2026-11-13-1/thumbnail",
+                    width: 1280,
+                    height: 800
+                ),
+                HrpBulletinAttachment(
+                    id: "att-pdf-hr-news-2026-11-13-1",
+                    kind: .pdf,
+                    fileName: "Bao-cao-nhanh-nhan-su-13-11-2026.pdf",
+                    title: "Báo cáo nhanh tình hình nhân sự & tiếp nhận hồ sơ ngày 13-11-2026",
+                    mimeType: "application/pdf",
+                    fileSizeBytes: 389_120,
+                    url: "/api/bulletins/bulletin-hr-news-2026-11-13/attachments/att-pdf-hr-news-2026-11-13-1/content",
+                    pageCount: 2
+                )
+            ]
         ),
         HrpBulletinItem(
             id: "bulletin-holiday-vietnam-culture-day",
             title: "Lịch nghỉ lễ ngày Văn hóa Việt Nam",
             category: .holidaySchedule,
+            publishedAt: "2026-11-13T07:30:00Z",
             publishedDateDisplay: "13-11-2026",
-            badgeText: "Lịch nghỉ lễ",
+            badgeText: "Quan trọng",
             isPinned: true,
+            isRead: false,
             summary: "Thông báo lịch nghỉ lễ ngày Văn hóa Việt Nam và hướng dẫn bố trí lịch trực vận hành, chấm công cho các bộ phận.",
             contentSections: [
-                "1. Thời gian nghỉ lễ: Cán bộ nhân viên và người lao động thực hiện lịch nghỉ lễ ngày Văn hóa Việt Nam theo thông báo của Công ty và lịch điều phối tại từng dự án tiếp nhận.",
+                "1. Thời gian nghỉ lễ: Cán bộ nhân viên và người lao động thực hiện lịch nghỉ lễ ngày Văn hóa Việt Nam theo thông báo chính thức của Công ty và lịch điều phối tại từng dự án tiếp nhận.",
                 "2. Công tác trực vận hành & hỗ trợ NLĐ: Các nhóm tuyển dụng và QLDA chủ động phân công nhân sự trực hỗ trợ người lao động tại các KCN có dây chuyền sản xuất hoạt động trong kỳ nghỉ.",
-                "3. Chấm công & tính công ngày lễ: Dữ liệu chấm công và chế độ ngày lễ được hệ thống HRP BI ghi nhận theo quy định hiện hành."
+                "3. Chấm công & tính công ngày lễ: Dữ liệu chấm công và chế độ ngày lễ được hệ thống HRP BI ghi nhận tự động theo quy định hiện hành."
             ],
-            authorDisplay: "Phòng Hành chính - Nhân sự HRPartner"
+            authorDisplay: "Phòng Hành chính - Nhân sự HRPartner",
+            attachments: [
+                HrpBulletinAttachment(
+                    id: "att-pdf-holiday-culture-day-2026",
+                    kind: .pdf,
+                    fileName: "Thong-bao-nghi-le-Van-hoa-VN-2026.pdf",
+                    title: "Thông báo số 112/TB-HRP về lịch nghỉ lễ Ngày Văn hóa Việt Nam",
+                    mimeType: "application/pdf",
+                    fileSizeBytes: 412_800,
+                    url: "/api/bulletins/bulletin-holiday-vietnam-culture-day/attachments/att-pdf-holiday-culture-day-2026/content",
+                    pageCount: 2
+                ),
+                HrpBulletinAttachment(
+                    id: "att-img-holiday-culture-day-2026",
+                    kind: .image,
+                    fileName: "lich-truc-van-hanh-kcn-le-2026.jpg",
+                    title: "Sơ đồ phân công trực vận hành tại các KCN dịp lễ",
+                    mimeType: "image/jpeg",
+                    fileSizeBytes: 218_400,
+                    url: "/api/bulletins/bulletin-holiday-vietnam-culture-day/attachments/att-img-holiday-culture-day-2026/content",
+                    thumbnailUrl: "/api/bulletins/bulletin-holiday-vietnam-culture-day/attachments/att-img-holiday-culture-day-2026/thumbnail",
+                    width: 1280,
+                    height: 800
+                )
+            ]
         ),
         HrpBulletinItem(
             id: "bulletin-ops-attendance-nov-2026",
             title: "Hướng dẫn rà soát bảng công & giải trình chấm công tháng 11-2026",
             category: .internalPolicy,
+            publishedAt: "2026-11-10T09:00:00Z",
             publishedDateDisplay: "10-11-2026",
             badgeText: nil,
             isPinned: false,
+            isRead: false,
             summary: "Nhắc lịch kiểm tra dữ liệu chấm công GPS/Wi-Fi và gửi đơn giải trình, đơn nghỉ phép trên ứng dụng trước kỳ chốt công.",
             contentSections: [
                 "1. CBNV chủ động theo dõi lịch sử chấm công hàng ngày tại mục Chấm công trên ứng dụng HRP BI.",
                 "2. Trường hợp phát sinh công tác tại dự án hoặc quên chấm công, vui lòng tạo Giải trình chấm công hoặc Đơn nghỉ phép trực tiếp trên ứng dụng để cấp quản lý phê duyệt kịp thời."
             ],
-            authorDisplay: "Ban Vận hành HRPartner"
+            authorDisplay: "Ban Vận hành HRPartner",
+            attachments: [
+                HrpBulletinAttachment(
+                    id: "att-img-ops-attendance-nov-2026",
+                    kind: .image,
+                    fileName: "quy-trinh-giai-trinh-cham-cong-hrpbi.jpg",
+                    title: "Infographic quy trình gửi giải trình & duyệt phép trên HRP BI",
+                    mimeType: "image/jpeg",
+                    fileSizeBytes: 196_608,
+                    url: "/api/bulletins/bulletin-ops-attendance-nov-2026/attachments/att-img-ops-attendance-nov-2026/content",
+                    thumbnailUrl: "/api/bulletins/bulletin-ops-attendance-nov-2026/attachments/att-img-ops-attendance-nov-2026/thumbnail",
+                    width: 1280,
+                    height: 800
+                )
+            ]
         )
     ]
+}
+
+public enum HrpBulletinContract {
+    /// Locked false while waiting for T0-BI to open `/api/bulletins` on Backend.
+    public static let REMOTE_API_ENABLED: Bool = false
+    public static let readBulletinIdsStorageKey: String = "hrpbi.bulletin.read_ids.v1"
+
+    public static func buildListPath(
+        category: HrpBulletinCategory = .all,
+        pageSize: Int = 10,
+        cursor: String? = nil
+    ) -> String {
+        var components = URLComponents()
+        components.path = "/api/bulletins"
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "category", value: category.rawValue),
+            URLQueryItem(name: "page_size", value: String(min(max(pageSize, 1), 50)))
+        ]
+        if let cursor = cursor?.trimmingCharacters(in: .whitespacesAndNewlines), !cursor.isEmpty {
+            queryItems.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        components.queryItems = queryItems
+        return components.string ?? "/api/bulletins"
+    }
+
+    public static func buildDetailPath(bulletinId: String) -> String {
+        let encoded = bulletinId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? bulletinId
+        return "/api/bulletins/\(encoded)"
+    }
+
+    public static func buildMarkReadPath(bulletinId: String) -> String {
+        "\(buildDetailPath(bulletinId: bulletinId))/read"
+    }
+
+    public static func parseAttachment(_ dict: [String: Any]) -> HrpBulletinAttachment? {
+        let id = dict.optString("attachment_id", "attachmentId", "id")
+        guard !id.isEmpty else { return nil }
+        let mime = dict.optString("mime_type", "mimeType", defaultValue: "application/octet-stream")
+        let kind = HrpBulletinAttachmentKind.fromRaw(dict.optNullableString("kind", "type"), mimeType: mime)
+        let fileName = dict.optString("file_name", "fileName", defaultValue: id)
+        let title = dict.optString("title", "display_name", "displayName", defaultValue: fileName)
+        return HrpBulletinAttachment(
+            id: id,
+            kind: kind,
+            fileName: fileName,
+            title: title,
+            mimeType: mime,
+            fileSizeBytes: dict.optInt("file_size_bytes", "fileSizeBytes", defaultValue: 0),
+            url: dict.optString("url", "content_url", "contentUrl"),
+            thumbnailUrl: dict.optNullableString("thumbnail_url", "thumbnailUrl"),
+            width: dict.optNullableInt("width"),
+            height: dict.optNullableInt("height"),
+            pageCount: dict.optNullableInt("page_count", "pageCount"),
+            sha256: dict.optNullableString("sha256")
+        )
+    }
+
+    public static func parseBulletinItem(_ dict: [String: Any]) -> HrpBulletinItem? {
+        let id = dict.optString("bulletin_id", "bulletinId", "id")
+        let title = dict.optString("title")
+        guard !id.isEmpty && !title.isEmpty else { return nil }
+
+        let category = HrpBulletinCategory.fromRaw(dict.optNullableString("category"))
+        let categoryDisplay = dict.optNullableString("category_display", "categoryDisplay")
+        let publishedAt = dict.optString("published_at", "publishedAt")
+        let publishedDateDisplay = dict.optString("published_date_display", "publishedDateDisplay", defaultValue: publishedAt)
+        let badgeText = dict.optNullableString("badge_text", "badgeText")
+        let isPinned = dict.optBool("is_pinned", "isPinned", defaultValue: false)
+        let isRead = dict.optBool("is_read", "isRead", defaultValue: false)
+        let summary = dict.optString("summary")
+        let sections = dict.optStringArray("content_sections", "contentSections")
+        let authorDisplay = dict.optString("author_display", "authorDisplay", defaultValue: "Ban Nhân sự HRPartner")
+
+        let parsedAttachments = dict.optObjectArray("attachments").compactMap { parseAttachment($0) }
+        var explicitSummary: HrpBulletinAttachmentSummary? = nil
+        if let summaryDict = dict["attachment_summary"] as? [String: Any] ?? dict["attachmentSummary"] as? [String: Any] {
+            explicitSummary = HrpBulletinAttachmentSummary(
+                imageCount: summaryDict.optInt("image_count", "imageCount", defaultValue: parsedAttachments.filter { $0.kind == .image }.count),
+                pdfCount: summaryDict.optInt("pdf_count", "pdfCount", defaultValue: parsedAttachments.filter { $0.kind == .pdf }.count)
+            )
+        }
+
+        return HrpBulletinItem(
+            id: id,
+            title: title,
+            category: category,
+            categoryDisplay: categoryDisplay,
+            publishedAt: publishedAt,
+            publishedDateDisplay: publishedDateDisplay,
+            badgeText: badgeText,
+            isPinned: isPinned,
+            isRead: isRead,
+            summary: summary,
+            contentSections: sections,
+            authorDisplay: authorDisplay,
+            attachmentSummary: explicitSummary,
+            attachments: parsedAttachments
+        )
+    }
 }
 
 // MARK: - Safe Dictionary JSON Extraction Extensions

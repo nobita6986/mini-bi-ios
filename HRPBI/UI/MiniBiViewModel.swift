@@ -75,6 +75,10 @@ public final class MiniBiViewModel: ObservableObject {
         bulletinItems.filter { $0.isPinned }.count
     }
 
+    public var unreadBulletinCount: Int {
+        bulletinItems.filter { !$0.isRead }.count
+    }
+
     // MARK: - Dashboard & CCCD Review State
     @Published public var selectedDashboardSubTab: DashboardSubTab = .overview {
         didSet {
@@ -492,6 +496,58 @@ public final class MiniBiViewModel: ObservableObject {
                 self?.taskReminders = updated
             }
         }
+
+        reloadBulletins()
+    }
+
+    // MARK: - HRPartner Bulletin ("Bản tin HRPartner" — Local isRead Persistence + /api/bulletins Contract Gate)
+
+    private func loadPersistedReadBulletinIds() -> Set<String> {
+        let arr = UserDefaults.standard.stringArray(forKey: HrpBulletinContract.readBulletinIdsStorageKey) ?? []
+        return Set(arr.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+    }
+
+    private func savePersistedReadBulletinIds(_ ids: Set<String>) {
+        UserDefaults.standard.set(Array(ids).sorted(), forKey: HrpBulletinContract.readBulletinIdsStorageKey)
+    }
+
+    public func reloadBulletins() {
+        let readIds = loadPersistedReadBulletinIds()
+        if !HrpBulletinContract.REMOTE_API_ENABLED {
+            bulletinItems = HrpBulletinItem.defaultMockupItems.map { item in
+                var copy = item
+                if readIds.contains(copy.id) {
+                    copy.isRead = true
+                }
+                return copy
+            }
+        }
+    }
+
+    public func markBulletinRead(_ bulletinId: String) {
+        let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+        var readIds = loadPersistedReadBulletinIds()
+        readIds.insert(cleanId)
+        savePersistedReadBulletinIds(readIds)
+
+        for idx in bulletinItems.indices where bulletinItems[idx].id == cleanId {
+            bulletinItems[idx].isRead = true
+        }
+    }
+
+    public func markAllBulletinsRead() {
+        var readIds = loadPersistedReadBulletinIds()
+        for idx in bulletinItems.indices {
+            readIds.insert(bulletinItems[idx].id)
+            bulletinItems[idx].isRead = true
+        }
+        savePersistedReadBulletinIds(readIds)
+    }
+
+    public func resetBulletinReadStateForTesting() {
+        UserDefaults.standard.removeObject(forKey: HrpBulletinContract.readBulletinIdsStorageKey)
+        bulletinItems = HrpBulletinItem.defaultMockupItems
     }
 
     // MARK: - Local Task Reminders ("Nhắc việc")

@@ -5707,21 +5707,115 @@ final class HRPBTests: XCTestCase {
     }
 
     @MainActor
-    func testRound9_HrpBulletinMockupItemsAndCategoryFilter() {
+    func testRound9_HrpBulletinMockupItemsAndCategoryFilter() throws {
+        XCTAssertFalse(HrpBulletinContract.REMOTE_API_ENABLED)
+        XCTAssertEqual(
+            HrpBulletinContract.buildListPath(category: .hrNews, page: 1, limit: 20),
+            "/api/bulletins?page=1&limit=20&category=HR_NEWS"
+        )
+        XCTAssertEqual(
+            HrpBulletinContract.buildDetailPath(bulletinId: "bul_20261113_001"),
+            "/api/bulletins/bul_20261113_001"
+        )
+        XCTAssertEqual(
+            HrpBulletinContract.buildMarkReadPath(bulletinId: "bul_20261113_001"),
+            "/api/bulletins/bul_20261113_001/read"
+        )
+
         let vm = MiniBiViewModel()
+        vm.resetBulletinReadStateForTesting()
+        defer { vm.resetBulletinReadStateForTesting() }
+
         XCTAssertFalse(vm.isBulletinSheetPresented)
         XCTAssertEqual(vm.selectedBulletinCategory, .all)
         XCTAssertEqual(vm.bulletinItems.count, 3)
         XCTAssertEqual(vm.pinnedBulletinCount, 2)
+        XCTAssertEqual(vm.unreadBulletinCount, 3)
         XCTAssertTrue(vm.bulletinItems.contains(where: { $0.title == "Tin nhân sự ngày 13-11-2026" }))
         XCTAssertTrue(vm.bulletinItems.contains(where: { $0.title == "Lịch nghỉ lễ ngày Văn hóa Việt Nam" }))
 
         vm.selectedBulletinCategory = .hrNews
         XCTAssertEqual(vm.filteredBulletinItems.count, 1)
-        XCTAssertEqual(vm.filteredBulletinItems.first?.title, "Tin nhân sự ngày 13-11-2026")
+        let hrBulletin = try XCTUnwrap(vm.filteredBulletinItems.first)
+        XCTAssertEqual(hrBulletin.title, "Tin nhân sự ngày 13-11-2026")
+        XCTAssertEqual(hrBulletin.imageAttachments.count, 1)
+        XCTAssertEqual(hrBulletin.pdfAttachments.count, 1)
+        XCTAssertEqual(hrBulletin.attachmentSummary.imageCount, 1)
+        XCTAssertEqual(hrBulletin.attachmentSummary.pdfCount, 1)
+
+        // Verify UIGraphicsImageRenderer & UIGraphicsPDFRenderer 2-page PDF generation
+        let imageAtt = try XCTUnwrap(hrBulletin.imageAttachments.first)
+        let generatedImg = HrpBulletinMockupMediaGenerator.sampleImage(for: imageAtt, bulletin: hrBulletin)
+        XCTAssertGreaterThan(generatedImg.size.width, 0)
+        XCTAssertGreaterThan(generatedImg.size.height, 0)
+
+        let pdfAtt = try XCTUnwrap(hrBulletin.pdfAttachments.first)
+        let pdfUrl = try XCTUnwrap(HrpBulletinMockupMediaGenerator.samplePdfUrl(for: pdfAtt, bulletin: hrBulletin))
+        let pdfDoc = try XCTUnwrap(PDFDocument(url: pdfUrl))
+        XCTAssertEqual(pdfDoc.pageCount, 2)
 
         vm.selectedBulletinCategory = .holidaySchedule
         XCTAssertEqual(vm.filteredBulletinItems.count, 1)
         XCTAssertEqual(vm.filteredBulletinItems.first?.title, "Lịch nghỉ lễ ngày Văn hóa Việt Nam")
+
+        // Verify local isRead persistence across ViewModel instances
+        vm.markBulletinRead("bulletin-hr-news-2026-11-13")
+        XCTAssertEqual(vm.unreadBulletinCount, 2)
+        XCTAssertEqual(vm.bulletinItems.first(where: { $0.id == "bulletin-hr-news-2026-11-13" })?.isRead, true)
+
+        let vmReloaded = MiniBiViewModel()
+        XCTAssertEqual(vmReloaded.unreadBulletinCount, 2)
+        XCTAssertEqual(vmReloaded.bulletinItems.first(where: { $0.id == "bulletin-hr-news-2026-11-13" })?.isRead, true)
+
+        vmReloaded.markAllBulletinsRead()
+        XCTAssertEqual(vmReloaded.unreadBulletinCount, 0)
+
+        // Verify /api/bulletins JSON contract parser
+        let parsedContractBulletin = HrpBulletinContract.parseBulletinItem([
+            "id": "bul_20261113_999",
+            "category": "HOLIDAY_SCHEDULE",
+            "category_display": "Lịch nghỉ lễ",
+            "title": "Lịch nghỉ lễ ngày Văn hóa Việt Nam",
+            "summary": "Tóm tắt bản tin nghỉ lễ",
+            "body_paragraphs": ["Đoạn 1", "Đoạn 2"],
+            "published_at": "2026-11-13T08:00:00Z",
+            "published_date_display": "13-11-2026",
+            "author_department": "Phòng HCNS",
+            "is_pinned": true,
+            "is_read": false,
+            "attachment_summary": [
+                "image_count": 1,
+                "pdf_count": 1
+            ],
+            "attachments": [
+                [
+                    "id": "att_img_999",
+                    "kind": "IMAGE",
+                    "file_name": "banner.jpg",
+                    "title": "Banner thông báo",
+                    "mime_type": "image/jpeg",
+                    "file_size_bytes": 384210,
+                    "url": "https://bi.hrpartner.vn/api/bulletins/bul_20261113_999/attachments/att_img_999/content",
+                    "thumbnail_url": "https://bi.hrpartner.vn/api/bulletins/bul_20261113_999/attachments/att_img_999/thumbnail",
+                    "width": 1600,
+                    "height": 900
+                ],
+                [
+                    "id": "att_pdf_999",
+                    "kind": "PDF",
+                    "file_name": "quyet-dinh.pdf",
+                    "title": "Quyết định nghỉ lễ",
+                    "mime_type": "application/pdf",
+                    "file_size_bytes": 1245184,
+                    "url": "https://bi.hrpartner.vn/api/bulletins/bul_20261113_999/attachments/att_pdf_999/content",
+                    "page_count": 2
+                ]
+            ]
+        ])
+        XCTAssertEqual(parsedContractBulletin.id, "bul_20261113_999")
+        XCTAssertEqual(parsedContractBulletin.category, .holidaySchedule)
+        XCTAssertEqual(parsedContractBulletin.imageAttachments.count, 1)
+        XCTAssertEqual(parsedContractBulletin.pdfAttachments.count, 1)
+        XCTAssertEqual(parsedContractBulletin.pdfAttachments.first?.pageCount, 2)
     }
 }
