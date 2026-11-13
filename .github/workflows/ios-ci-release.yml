@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - "V1.0.*"
+      - "V1.*"
   pull_request:
     branches:
       - main
@@ -298,7 +298,7 @@ jobs:
             ${{ runner.temp }}/${{ steps.version.outputs.ipa_filename }}
 
       - name: Create or Update GitHub Release with signed .ipa
-        if: steps.check_secrets.outputs.configured == 'true' && github.event_name != 'pull_request' && inputs.upload_to_testflight != 'false' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/V1.0.'))
+        if: steps.check_secrets.outputs.configured == 'true' && github.event_name != 'pull_request' && inputs.upload_to_testflight != 'false' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/V1.'))
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -319,18 +319,29 @@ jobs:
           fi
 
       - name: Upload .ipa to TestFlight (App Store Connect)
-        if: steps.check_secrets.outputs.configured == 'true' && inputs.upload_to_testflight != 'false' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/V1.0.'))
+        if: steps.check_secrets.outputs.configured == 'true' && inputs.upload_to_testflight != 'false' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/V1.'))
         run: |
           mkdir -p "$HOME/.appstoreconnect/private_keys"
           KEY_FILE="$HOME/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
           echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
 
-          xcrun altool --upload-app \
-            --type ios \
-            -f "$RUNNER_TEMP/${{ steps.version.outputs.ipa_filename }}" \
-            --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
-            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
+          for ATTEMPT in 1 2 3; do
+            echo "Uploading .ipa to TestFlight (Attempt $ATTEMPT/3)..."
+            if xcrun altool --upload-app \
+              --type ios \
+              -f "$RUNNER_TEMP/${{ steps.version.outputs.ipa_filename }}" \
+              --apiKey "$APP_STORE_CONNECT_API_KEY_ID" \
+              --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"; then
+              echo "TestFlight upload succeeded on attempt $ATTEMPT."
+              exit 0
+            fi
+            if [ "$ATTEMPT" -lt 3 ]; then
+              echo "Attempt $ATTEMPT failed, retrying in 15 seconds..."
+              sleep 15
+            fi
+          done
+          exit 1
 
       - name: Clean up temporary Keychain & API Key
         if: always() && steps.check_secrets.outputs.configured == 'true'
