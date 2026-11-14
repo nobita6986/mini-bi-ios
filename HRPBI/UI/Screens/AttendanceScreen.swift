@@ -4362,8 +4362,6 @@ public struct AttendanceLiveBeautyCameraSheet: View {
     @State private var isScreenFlashOn: Bool = false
     @State private var isComparingOriginal: Bool = false
     @State private var captureTriggerToken: Int = 0
-    @State private var stagedRawPhotoData: Data? = nil
-    @State private var stagedBeautifiedPhotoData: Data? = nil
     @State private var isProcessingStill: Bool = false
     @State private var cameraUnavailable: Bool = false
     @State private var fallbackPickerItem: PhotosPickerItem? = nil
@@ -4394,7 +4392,7 @@ public struct AttendanceLiveBeautyCameraSheet: View {
             guard let newItem else { return }
             Task {
                 if let data = try? await newItem.loadTransferable(type: Data.self) {
-                    handleCapturedRawFrame(data)
+                    handleFallbackPickedPhoto(data)
                 }
                 fallbackPickerItem = nil
             }
@@ -4455,58 +4453,59 @@ public struct AttendanceLiveBeautyCameraSheet: View {
             .accessibilityLabel("Đèn bù sáng màn hình")
         }
         .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
     }
 
     @ViewBuilder
     private var cameraViewfinderSection: some View {
-        ZStack {
-            if let stagedData = (isComparingOriginal ? stagedRawPhotoData : stagedBeautifiedPhotoData) ?? stagedBeautifiedPhotoData,
-               let stagedImage = UIImage(data: stagedData) {
-                Image(uiImage: stagedImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
-            } else if cameraUnavailable {
-                cameraUnavailableFallbackView
-            } else {
-                AttendanceLiveBeautyCameraRepresentable(
-                    useFrontCamera: useFrontCamera,
-                    preset: isComparingOriginal ? .original : selectedPreset,
-                    intensity: selectedIntensity,
-                    captureTriggerToken: captureTriggerToken,
-                    onFrameCaptured: { rawData in
-                        handleCapturedRawFrame(rawData)
-                    },
-                    onCameraUnavailable: {
-                        cameraUnavailable = true
-                    }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-            }
-
-            if isScreenFlashOn {
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color(hex: 0xFFFBEB).opacity(0.92),
-                                Color(hex: 0xFEF3C7).opacity(0.85)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 26
+        GeometryReader { geo in
+            ZStack {
+                if cameraUnavailable {
+                    cameraUnavailableFallbackView
+                        .frame(width: geo.size.width, height: geo.size.height)
+                } else {
+                    AttendanceLiveBeautyCameraRepresentable(
+                        useFrontCamera: useFrontCamera,
+                        preset: isComparingOriginal ? .original : selectedPreset,
+                        intensity: selectedIntensity,
+                        captureTriggerToken: captureTriggerToken,
+                        onFrameCaptured: { normalizedRaw, beautifiedData in
+                            HapticsManager.success()
+                            isProcessingStill = false
+                            onPhotoCaptured(normalizedRaw, beautifiedData)
+                            dismiss()
+                        },
+                        onCameraUnavailable: {
+                            cameraUnavailable = true
+                        }
                     )
-                    .allowsHitTesting(false)
-            }
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+                }
 
-            viewfinderOverlayHud
+                if isScreenFlashOn {
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    Color(hex: 0xFFFBEB).opacity(0.92),
+                                    Color(hex: 0xFEF3C7).opacity(0.85)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                            lineWidth: 26
+                        )
+                        .allowsHitTesting(false)
+                }
+
+                viewfinderOverlayHud
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.horizontal, 8)
     }
 
@@ -4617,7 +4616,7 @@ public struct AttendanceLiveBeautyCameraSheet: View {
 
     @ViewBuilder
     private var beautyControlsPanel: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             if selectedPreset != .original {
                 HStack(spacing: 10) {
                     Image(systemName: "slider.horizontal.3")
@@ -4635,12 +4634,7 @@ public struct AttendanceLiveBeautyCameraSheet: View {
                             }
                         ),
                         in: 0.10...1.0,
-                        step: 0.05,
-                        onEditingChanged: { editing in
-                            if !editing {
-                                reapplyStagedPhotoIfNeeded()
-                            }
-                        }
+                        step: 0.05
                     )
                     .tint(theme.primary)
                     Text("\(Int(round(selectedIntensity * 100)))%")
@@ -4662,7 +4656,7 @@ public struct AttendanceLiveBeautyCameraSheet: View {
 
             bottomActionRow
         }
-        .padding(.top, 12)
+        .padding(.top, 10)
     }
 
     @ViewBuilder
@@ -4675,7 +4669,6 @@ public struct AttendanceLiveBeautyCameraSheet: View {
             HapticsManager.selection()
             selectedPreset = preset
             AttendanceBeautyFilter.savePreset(preset)
-            reapplyStagedPhotoIfNeeded()
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: preset.iconName)
@@ -4698,107 +4691,70 @@ public struct AttendanceLiveBeautyCameraSheet: View {
 
     @ViewBuilder
     private var bottomActionRow: some View {
-        if let rawData = stagedRawPhotoData, let beautifiedData = stagedBeautifiedPhotoData {
-            HStack(spacing: 14) {
-                Button {
-                    HapticsManager.selection()
-                    stagedRawPhotoData = nil
-                    stagedBeautifiedPhotoData = nil
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.counterclockwise")
-                        Text("Chụp lại")
-                    }
-                    .font(.subheadline.weight(.bold))
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(selectedPreset.labelVi)
+                    .font(.caption.weight(.bold))
                     .foregroundColor(.white)
-                    .frame(maxWidth: .infinity, minHeight: 50)
-                    .background(Color.white.opacity(0.18))
-                    .clipShape(Capsule())
-                }
+                Text(selectedPreset.subtitleVi)
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.7))
+                    .lineLimit(1)
+            }
+            .frame(width: 110, alignment: .leading)
 
-                Button {
-                    HapticsManager.success()
-                    onPhotoCaptured(rawData, beautifiedData)
-                    dismiss()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.circle.fill")
-                        Text("Dùng ảnh chấm công")
+            Spacer()
+
+            Button {
+                guard !isProcessingStill else { return }
+                HapticsManager.lightImpact()
+                isProcessingStill = true
+                captureTriggerToken &+= 1
+            } label: {
+                ZStack {
+                    Circle()
+                        .stroke(Color.white, lineWidth: 4)
+                        .frame(width: 72, height: 72)
+                    Circle()
+                        .fill(theme.primary)
+                        .frame(width: 58, height: 58)
+                    if isProcessingStill {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundColor(.white)
                     }
-                    .font(.subheadline.weight(.bold))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity, minHeight: 50)
-                    .background(SemanticColors.successText)
-                    .clipShape(Capsule())
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
-        } else {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(selectedPreset.labelVi)
-                        .font(.caption.weight(.bold))
-                        .foregroundColor(.white)
-                    Text(selectedPreset.subtitleVi)
-                        .font(.system(size: 10))
-                        .foregroundColor(.white.opacity(0.7))
-                        .lineLimit(1)
+            .disabled(isProcessingStill || cameraUnavailable)
+
+            Spacer()
+
+            Button {
+                HapticsManager.selection()
+                useFrontCamera.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "camera.rotate.fill")
+                        .font(.system(size: 14, weight: .bold))
+                    Text(useFrontCamera ? "Cam trước" : "Cam sau")
+                        .font(.caption.weight(.semibold))
                 }
-                .frame(width: 110, alignment: .leading)
-
-                Spacer()
-
-                Button {
-                    guard !isProcessingStill else { return }
-                    HapticsManager.lightImpact()
-                    captureTriggerToken &+= 1
-                } label: {
-                    ZStack {
-                        Circle()
-                            .stroke(Color.white, lineWidth: 4)
-                            .frame(width: 72, height: 72)
-                        Circle()
-                            .fill(theme.primary)
-                            .frame(width: 58, height: 58)
-                        if isProcessingStill {
-                            ProgressView()
-                                .tint(.white)
-                        } else {
-                            Image(systemName: "camera.fill")
-                                .font(.system(size: 22, weight: .bold))
-                                .foregroundColor(.white)
-                        }
-                    }
-                }
-                .disabled(isProcessingStill || cameraUnavailable)
-
-                Spacer()
-
-                Button {
-                    HapticsManager.selection()
-                    useFrontCamera.toggle()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "camera.rotate.fill")
-                            .font(.system(size: 14, weight: .bold))
-                        Text(useFrontCamera ? "Cam trước" : "Cam sau")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(Color.white.opacity(0.16))
-                    .clipShape(Capsule())
-                }
-                .frame(width: 110, alignment: .trailing)
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color.white.opacity(0.16))
+                .clipShape(Capsule())
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 12)
+            .frame(width: 110, alignment: .trailing)
         }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
     }
 
-    private func handleCapturedRawFrame(_ rawData: Data) {
+    private func handleFallbackPickedPhoto(_ rawData: Data) {
         isProcessingStill = true
         let preset = selectedPreset
         let intensity = selectedIntensity
@@ -4816,27 +4772,10 @@ public struct AttendanceLiveBeautyCameraSheet: View {
                 compressionQuality: 0.85
             )
             DispatchQueue.main.async {
-                self.stagedRawPhotoData = normalizedRaw
-                self.stagedBeautifiedPhotoData = beautified
+                HapticsManager.success()
                 self.isProcessingStill = false
-            }
-        }
-    }
-
-    private func reapplyStagedPhotoIfNeeded() {
-        guard let rawData = stagedRawPhotoData else { return }
-        let preset = selectedPreset
-        let intensity = selectedIntensity
-        DispatchQueue.global(qos: .userInitiated).async {
-            let beautified = AttendanceBeautyFilter.apply(
-                to: rawData,
-                preset: preset,
-                intensity: intensity,
-                maxDimensionPx: 1600,
-                compressionQuality: 0.85
-            )
-            DispatchQueue.main.async {
-                self.stagedBeautifiedPhotoData = beautified
+                self.onPhotoCaptured(normalizedRaw, beautified)
+                self.dismiss()
             }
         }
     }
@@ -4847,19 +4786,22 @@ private struct AttendanceLiveBeautyCameraRepresentable: UIViewControllerRepresen
     let preset: AttendanceBeautyPreset
     let intensity: Double
     let captureTriggerToken: Int
-    let onFrameCaptured: (Data) -> Void
+    let onFrameCaptured: (_ rawNormalizedData: Data, _ beautifiedData: Data) -> Void
     let onCameraUnavailable: () -> Void
 
     func makeUIViewController(context: Context) -> AttendanceLiveBeautyCameraViewController {
         let vc = AttendanceLiveBeautyCameraViewController()
         vc.onFrameCaptured = onFrameCaptured
         vc.onCameraUnavailable = onCameraUnavailable
+        vc.syncCaptureToken(captureTriggerToken)
         vc.updateFilterConfiguration(preset: preset, intensity: intensity)
         vc.configureCameraPosition(useFront: useFrontCamera)
         return vc
     }
 
     func updateUIViewController(_ uiViewController: AttendanceLiveBeautyCameraViewController, context: Context) {
+        uiViewController.onFrameCaptured = onFrameCaptured
+        uiViewController.onCameraUnavailable = onCameraUnavailable
         uiViewController.updateFilterConfiguration(preset: preset, intensity: intensity)
         uiViewController.configureCameraPosition(useFront: useFrontCamera)
         uiViewController.triggerCaptureIfNeeded(token: captureTriggerToken)
@@ -4867,7 +4809,7 @@ private struct AttendanceLiveBeautyCameraRepresentable: UIViewControllerRepresen
 }
 
 private final class AttendanceLiveBeautyCameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
-    var onFrameCaptured: ((Data) -> Void)?
+    var onFrameCaptured: ((_ rawNormalizedData: Data, _ beautifiedData: Data) -> Void)?
     var onCameraUnavailable: (() -> Void)?
 
     private let previewImageView = UIImageView()
@@ -4885,6 +4827,7 @@ private final class AttendanceLiveBeautyCameraViewController: UIViewController, 
     private var activeIntensity: Double = AttendanceBeautyFilter.defaultIntensity
     private var cachedFaceBoundingBoxes: [CGRect] = []
     private var frameCounter: Int = 0
+    private var cameraWarmupFrames: Int = 0
     private var isDetectingFaces: Bool = false
 
     override func viewDidLoad() {
@@ -4903,6 +4846,10 @@ private final class AttendanceLiveBeautyCameraViewController: UIViewController, 
             guard let self, self.captureSession.isRunning else { return }
             self.captureSession.stopRunning()
         }
+    }
+
+    func syncCaptureToken(_ token: Int) {
+        lastHandledCaptureToken = token
     }
 
     func updateFilterConfiguration(preset: AttendanceBeautyPreset, intensity: Double) {
@@ -4958,6 +4905,10 @@ private final class AttendanceLiveBeautyCameraViewController: UIViewController, 
                 return
             }
 
+            self.filterLock.lock()
+            self.cameraWarmupFrames = 0
+            self.filterLock.unlock()
+
             self.captureSession.beginConfiguration()
             if self.captureSession.canSetSessionPreset(.high) {
                 self.captureSession.sessionPreset = .high
@@ -5007,10 +4958,12 @@ private final class AttendanceLiveBeautyCameraViewController: UIViewController, 
         guard !extent.isEmpty else { return }
 
         filterLock.lock()
+        cameraWarmupFrames &+= 1
+        let isWarmedUp = cameraWarmupFrames >= 5
         let preset = activePreset
         let intensity = activeIntensity
         let faceBoxes = cachedFaceBoundingBoxes
-        let shouldCaptureStill = pendingCaptureRequest
+        let shouldCaptureStill = pendingCaptureRequest && isWarmedUp
         if shouldCaptureStill {
             pendingCaptureRequest = false
         }
@@ -5035,17 +4988,6 @@ private final class AttendanceLiveBeautyCameraViewController: UIViewController, 
             }
         }
 
-        if shouldCaptureStill {
-            if let rawCG = AttendanceBeautyFilter.sharedCIContext.createCGImage(rawCIImage, from: extent) {
-                let rawUI = UIImage(cgImage: rawCG, scale: 1.0, orientation: .up)
-                if let rawJpeg = rawUI.jpegData(compressionQuality: 0.90) {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.onFrameCaptured?(rawJpeg)
-                    }
-                }
-            }
-        }
-
         let displayCIImage = AttendanceBeautyFilter.applyToCIImage(
             rawCIImage,
             preset: preset,
@@ -5060,6 +5002,33 @@ private final class AttendanceLiveBeautyCameraViewController: UIViewController, 
         let previewImage = UIImage(cgImage: cgImage)
         DispatchQueue.main.async { [weak self] in
             self?.previewImageView.image = previewImage
+        }
+
+        if shouldCaptureStill {
+            let beautifiedRawJpeg = previewImage.jpegData(compressionQuality: 0.88) ?? Data()
+            let rawJpeg: Data = {
+                if preset == .original {
+                    return beautifiedRawJpeg
+                }
+                if let rawCG = AttendanceBeautyFilter.sharedCIContext.createCGImage(rawCIImage, from: extent) {
+                    return UIImage(cgImage: rawCG, scale: 1.0, orientation: .up).jpegData(compressionQuality: 0.90) ?? beautifiedRawJpeg
+                }
+                return beautifiedRawJpeg
+            }()
+
+            let normalizedRaw = AttendanceContract.normalizeCameraJpeg(
+                rawJpeg,
+                maxDimensionPx: 1600,
+                compressionQuality: 0.90
+            )
+            let normalizedBeautified = AttendanceContract.normalizeCameraJpeg(
+                beautifiedRawJpeg,
+                maxDimensionPx: 1600,
+                compressionQuality: 0.85
+            )
+            DispatchQueue.main.async { [weak self] in
+                self?.onFrameCaptured?(normalizedRaw, normalizedBeautified)
+            }
         }
     }
 }

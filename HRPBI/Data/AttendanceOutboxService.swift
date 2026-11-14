@@ -428,15 +428,15 @@ public enum AttendanceBeautyFilter {
         }
     }
 
-    /// Detects faces & facial landmarks (`leftEye`, `rightEye`, `leftEyebrow`, `rightEyebrow`, `outerLips`) via Vision.
-    /// Boosts skin smoothing on cheeks/forehead/chin while carving out protective sharp zones over eyes, eyebrows, and lips.
+    /// Detects faces via Vision (`VNDetectFaceRectanglesRequest`) and builds a smooth radial mask
+    /// that boosts skin smoothing on facial skin while keeping a natural falloff to the background.
     private static func buildFaceSmoothingMaskWithLandmarks(
         for image: CIImage,
         extent: CGRect,
         baseOpacity: CGFloat,
         facePeakOpacity: CGFloat
     ) -> CIImage? {
-        let request = VNDetectFaceLandmarksRequest()
+        let request = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(ciImage: image, options: [:])
         do {
             try handler.perform([request])
@@ -444,91 +444,17 @@ public enum AttendanceBeautyFilter {
             return nil
         }
 
-        guard let faces = request.results, !faces.isEmpty else {
+        let boxes = (request.results ?? []).map(\.boundingBox)
+        guard !boxes.isEmpty else {
             return nil
         }
 
-        let baseColor = CIColor(red: baseOpacity, green: baseOpacity, blue: baseOpacity, alpha: 1.0)
-        let peakColor = CIColor(red: facePeakOpacity, green: facePeakOpacity, blue: facePeakOpacity, alpha: 1.0)
-        let sharpFeatureColor = CIColor(red: max(0.04, baseOpacity * 0.25), green: max(0.04, baseOpacity * 0.25), blue: max(0.04, baseOpacity * 0.25), alpha: 1.0)
-        var compositeMask = CIImage(color: baseColor).cropped(to: extent)
-
-        for face in faces {
-            let bbox = face.boundingBox
-            let faceRect = CGRect(
-                x: extent.minX + bbox.minX * extent.width,
-                y: extent.minY + bbox.minY * extent.height,
-                width: bbox.width * extent.width,
-                height: bbox.height * extent.height
-            )
-            let centerX = faceRect.midX
-            let centerY = faceRect.midY
-            let faceRadius = max(faceRect.width, faceRect.height) * 0.72
-            guard faceRadius > 8,
-                  let radial = CIFilter(name: "CIRadialGradient") else {
-                continue
-            }
-            radial.setValue(CIVector(x: centerX, y: centerY), forKey: "inputCenter")
-            radial.setValue(faceRadius * 0.45, forKey: "inputRadius0")
-            radial.setValue(faceRadius * 1.15, forKey: "inputRadius1")
-            radial.setValue(peakColor, forKey: "inputColor0")
-            radial.setValue(baseColor, forKey: "inputColor1")
-            if let faceGradient = radial.outputImage?.cropped(to: extent),
-               let lighten = CIFilter(name: "CIMaximumCompositing") {
-                lighten.setValue(faceGradient, forKey: kCIInputImageKey)
-                lighten.setValue(compositeMask, forKey: kCIInputBackgroundImageKey)
-                if let merged = lighten.outputImage?.cropped(to: extent) {
-                    compositeMask = merged
-                }
-            }
-
-            // Carve out sharp detail protection zones for Eyes, Eyebrows & Lips
-            if let landmarks = face.landmarks {
-                let protectedRegions: [VNFaceLandmarkRegion2D?] = [
-                    landmarks.leftEye,
-                    landmarks.rightEye,
-                    landmarks.leftEyebrow,
-                    landmarks.rightEyebrow,
-                    landmarks.outerLips
-                ]
-                for region in protectedRegions.compactMap({ $0 }) {
-                    let pts = region.normalizedPoints
-                    guard !pts.isEmpty else { continue }
-                    var minX: CGFloat = 1.0
-                    var maxX: CGFloat = 0.0
-                    var minY: CGFloat = 1.0
-                    var maxY: CGFloat = 0.0
-                    for p in pts {
-                        minX = min(minX, p.x)
-                        maxX = max(maxX, p.x)
-                        minY = min(minY, p.y)
-                        maxY = max(maxY, p.y)
-                    }
-                    let featureCenterX = faceRect.minX + ((minX + maxX) * 0.5) * faceRect.width
-                    let featureCenterY = faceRect.minY + ((minY + maxY) * 0.5) * faceRect.height
-                    let featureRadius = max((maxX - minX) * faceRect.width, (maxY - minY) * faceRect.height) * 0.65
-                    guard featureRadius > 3,
-                          let protectRadial = CIFilter(name: "CIRadialGradient") else {
-                        continue
-                    }
-                    protectRadial.setValue(CIVector(x: featureCenterX, y: featureCenterY), forKey: "inputCenter")
-                    protectRadial.setValue(featureRadius * 0.40, forKey: "inputRadius0")
-                    protectRadial.setValue(featureRadius * 1.15, forKey: "inputRadius1")
-                    protectRadial.setValue(sharpFeatureColor, forKey: "inputColor0")
-                    protectRadial.setValue(CIColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0), forKey: "inputColor1")
-                    if let protectGradient = protectRadial.outputImage?.cropped(to: extent),
-                       let darken = CIFilter(name: "CIMinimumCompositing") {
-                        darken.setValue(protectGradient, forKey: kCIInputImageKey)
-                        darken.setValue(compositeMask, forKey: kCIInputBackgroundImageKey)
-                        if let protectedMask = darken.outputImage?.cropped(to: extent) {
-                            compositeMask = protectedMask
-                        }
-                    }
-                }
-            }
-        }
-
-        return compositeMask
+        return buildFastFaceBoxSmoothingMask(
+            faceBoundingBoxes: boxes,
+            extent: extent,
+            baseOpacity: baseOpacity,
+            facePeakOpacity: facePeakOpacity
+        )
     }
 
     /// Fast radial smoothing mask builder for 30fps live camera preview using cached normalized Vision face bounding boxes.
