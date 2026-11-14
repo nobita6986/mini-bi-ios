@@ -4385,380 +4385,9 @@ public struct AttendanceLiveBeautyCameraSheet: View {
             Color.black.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // 1. Top Camera Bar (Close + Title + Screen Ring Light + Flip Camera)
-                HStack(spacing: 12) {
-                    Button {
-                        HapticsManager.selection()
-                        dismiss()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 14, weight: .bold))
-                            Text("Đóng")
-                                .font(.subheadline.weight(.semibold))
-                        }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.16))
-                        .clipShape(Capsule())
-                    }
-
-                    Spacer()
-
-                    HStack(spacing: 5) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(Color(hex: 0xFBBF24))
-                        Text("Camera Chấm Công AI")
-                            .font(.caption.weight(.bold))
-                            .foregroundColor(.white)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.white.opacity(0.14))
-                    .clipShape(Capsule())
-
-                    Spacer()
-
-                    // Screen Ring Light Toggle (Soft Face Illumination in Low Light)
-                    Button {
-                        HapticsManager.selection()
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isScreenFlashOn.toggle()
-                        }
-                    } label: {
-                        Image(systemName: isScreenFlashOn ? "bolt.fill" : "bolt.slash.fill")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundColor(isScreenFlashOn ? Color.black : Color.white)
-                            .frame(width: 36, height: 36)
-                            .background(isScreenFlashOn ? Color(hex: 0xFBBF24) : Color.white.opacity(0.16))
-                            .clipShape(Circle())
-                    }
-                    .accessibilityLabel("Đèn bù sáng màn hình")
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 10)
-
-                // 2. Main Camera Viewfinder / Staged Photo Review Area
-                ZStack {
-                    if let stagedData = (isComparingOriginal ? stagedRawPhotoData : stagedBeautifiedPhotoData) ?? stagedBeautifiedPhotoData,
-                       let stagedImage = UIImage(data: stagedData) {
-                        Image(uiImage: stagedImage)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .clipped()
-                    } else if cameraUnavailable {
-                        VStack(spacing: 14) {
-                            Image(systemName: "camera.metering.unknown")
-                                .font(.system(size: 42, weight: .light))
-                                .foregroundColor(.white.opacity(0.8))
-                            Text("Thiết bị không có Camera vật lý hoặc chưa cấp quyền Camera.")
-                                .font(.subheadline.weight(.medium))
-                                .foregroundColor(.white.opacity(0.85))
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 28)
-
-                            HStack(spacing: 12) {
-                                Button {
-                                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                                        UIApplication.shared.open(url)
-                                    }
-                                } label: {
-                                    Text("Mở Cài đặt")
-                                        .font(.caption.weight(.bold))
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 9)
-                                        .background(Color.white.opacity(0.2))
-                                        .foregroundColor(.white)
-                                        .clipShape(Capsule())
-                                }
-
-                                PhotosPicker(selection: $fallbackPickerItem, matching: .images) {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: "photo.on.rectangle")
-                                        Text("Chọn ảnh thử nghiệm")
-                                    }
-                                    .font(.caption.weight(.bold))
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 9)
-                                    .background(theme.primary)
-                                    .foregroundColor(.white)
-                                    .clipShape(Capsule())
-                                }
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        AttendanceLiveBeautyCameraRepresentable(
-                            useFrontCamera: useFrontCamera,
-                            preset: isComparingOriginal ? .original : selectedPreset,
-                            intensity: selectedIntensity,
-                            captureTriggerToken: captureTriggerToken,
-                            onFrameCaptured: { rawData in
-                                handleCapturedRawFrame(rawData)
-                            },
-                            onCameraUnavailable: {
-                                cameraUnavailable = true
-                            }
-                        )
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipped()
-                    }
-
-                    // Soft Screen Ring-Light Overlay when enabled in low light
-                    if isScreenFlashOn {
-                        RoundedRectangle(cornerRadius: 24, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        Color(hex: 0xFFFBEB).opacity(0.92),
-                                        Color(hex: 0xFEF3C7).opacity(0.85)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                ),
-                                lineWidth: 26
-                            )
-                            .allowsHitTesting(false)
-                    }
-
-                    // Floating Preset Subtitle & Hold-to-Compare Button at Bottom of Viewfinder
-                    VStack {
-                        Spacer()
-                        HStack(alignment: .center) {
-                            HStack(spacing: 6) {
-                                Image(systemName: isComparingOriginal ? "camera.aperture" : selectedPreset.iconName)
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundColor(Color(hex: 0xFBBF24))
-                                Text(
-                                    isComparingOriginal
-                                        ? "Đang xem ảnh gốc"
-                                        : (selectedPreset == .original
-                                            ? "Chế độ: Gốc"
-                                            : "\(selectedPreset.labelVi) · \(Int(round(selectedIntensity * 100)))%")
-                                )
-                                .font(.caption2.weight(.bold).monospacedDigit())
-                                .foregroundColor(.white)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(Color.black.opacity(0.62))
-                            .clipShape(Capsule())
-
-                            Spacer()
-
-                            if selectedPreset != .original {
-                                HStack(spacing: 5) {
-                                    Image(systemName: isComparingOriginal ? "eye.slash.fill" : "eye.fill")
-                                        .font(.system(size: 11, weight: .bold))
-                                    Text("Giữ xem gốc")
-                                        .font(.caption2.weight(.bold))
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(isComparingOriginal ? theme.primary : Color.black.opacity(0.62))
-                                .foregroundColor(.white)
-                                .clipShape(Capsule())
-                                .gesture(
-                                    DragGesture(minimumDistance: 0)
-                                        .onChanged { _ in
-                                            if !isComparingOriginal {
-                                                HapticsManager.selection()
-                                                isComparingOriginal = true
-                                            }
-                                        }
-                                        .onEnded { _ in
-                                            isComparingOriginal = false
-                                        }
-                                )
-                            }
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 12)
-                    }
-                }
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                .padding(.horizontal, 8)
-
-                // 3. Beauty Controls Panel (Intensity Slider + 6 Preset Chips + Shutter / Use Photo Bar)
-                VStack(spacing: 12) {
-                    // Intensity Slider (0% - 100%)
-                    if selectedPreset != .original {
-                        HStack(spacing: 10) {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(.white.opacity(0.8))
-                            Text("Làm mịn & Sáng")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundColor(.white.opacity(0.85))
-                            Slider(
-                                value: Binding(
-                                    get: { selectedIntensity },
-                                    set: { newVal in
-                                        selectedIntensity = newVal
-                                        AttendanceBeautyFilter.saveIntensity(newVal)
-                                    }
-                                ),
-                                in: 0.10...1.0,
-                                step: 0.05,
-                                onEditingChanged: { editing in
-                                    if !editing {
-                                        reapplyStagedPhotoIfNeeded()
-                                    }
-                                }
-                            )
-                            .tint(theme.primary)
-                            Text("\(Int(round(selectedIntensity * 100)))%")
-                                .font(.caption2.weight(.bold).monospacedDigit())
-                                .foregroundColor(Color(hex: 0xFBBF24))
-                                .frame(width: 36, alignment: .trailing)
-                        }
-                        .padding(.horizontal, 16)
-                    }
-
-                    // 6 Beauty Preset Chips
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(AttendanceBeautyPreset.allCases) { preset in
-                                let isSelected = selectedPreset == preset
-                                Button {
-                                    HapticsManager.selection()
-                                    selectedPreset = preset
-                                    AttendanceBeautyFilter.savePreset(preset)
-                                    reapplyStagedPhotoIfNeeded()
-                                } label: {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: preset.iconName)
-                                            .font(.system(size: 11, weight: .semibold))
-                                        Text(preset.labelVi)
-                                            .font(.caption.weight(isSelected ? .bold : .medium))
-                                            .lineLimit(1)
-                                    }
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        Capsule(style: .continuous)
-                                            .fill(isSelected ? theme.primary : Color.white.opacity(0.14))
-                                    )
-                                    .foregroundColor(.white)
-                                    .overlay(
-                                        Capsule(style: .continuous)
-                                            .stroke(isSelected ? Color.white.opacity(0.9) : Color.white.opacity(0.18), lineWidth: 1)
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-
-                    // Bottom Action Row: Live Capture vs In-Camera Confirm
-                    if let rawData = stagedRawPhotoData, let beautifiedData = stagedBeautifiedPhotoData {
-                        HStack(spacing: 14) {
-                            Button {
-                                HapticsManager.selection()
-                                stagedRawPhotoData = nil
-                                stagedBeautifiedPhotoData = nil
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "arrow.counterclockwise")
-                                    Text("Chụp lại")
-                                }
-                                .font(.subheadline.weight(.bold))
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity, minHeight: 50)
-                                .background(Color.white.opacity(0.18))
-                                .clipShape(Capsule())
-                            }
-
-                            Button {
-                                HapticsManager.success()
-                                onPhotoCaptured(rawData, beautifiedData)
-                                dismiss()
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                    Text("Dùng ảnh chấm công")
-                                }
-                                .font(.subheadline.weight(.bold))
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity, minHeight: 50)
-                                .background(SemanticColors.successText)
-                                .clipShape(Capsule())
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 12)
-                    } else {
-                        HStack {
-                            // Left: Subtitle hint
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(selectedPreset.labelVi)
-                                    .font(.caption.weight(.bold))
-                                    .foregroundColor(.white)
-                                Text(selectedPreset.subtitleVi)
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.white.opacity(0.7))
-                                    .lineLimit(1)
-                            }
-                            .frame(width: 110, alignment: .leading)
-
-                            Spacer()
-
-                            // Center: Shutter Button
-                            Button {
-                                guard !isProcessingStill else { return }
-                                HapticsManager.mediumImpact()
-                                captureTriggerToken &+= 1
-                            } label: {
-                                ZStack {
-                                    Circle()
-                                        .stroke(Color.white, lineWidth: 4)
-                                        .frame(width: 72, height: 72)
-                                    Circle()
-                                        .fill(theme.primary)
-                                        .frame(width: 58, height: 58)
-                                    if isProcessingStill {
-                                        ProgressView()
-                                            .tint(.white)
-                                    } else {
-                                        Image(systemName: "camera.fill")
-                                            .font(.system(size: 22, weight: .bold))
-                                            .foregroundColor(.white)
-                                    }
-                                }
-                            }
-                            .disabled(isProcessingStill || cameraUnavailable)
-
-                            Spacer()
-
-                            // Right: Flip Front / Back Camera
-                            Button {
-                                HapticsManager.selection()
-                                useFrontCamera.toggle()
-                            } label: {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "camera.rotate.fill")
-                                        .font(.system(size: 14, weight: .bold))
-                                    Text(useFrontCamera ? "Cam trước" : "Cam sau")
-                                        .font(.caption.weight(.semibold))
-                                }
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 9)
-                                .background(Color.white.opacity(0.16))
-                                .clipShape(Capsule())
-                            }
-                            .frame(width: 110, alignment: .trailing)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 12)
-                    }
-                }
-                .padding(.top, 12)
+                topCameraBar
+                cameraViewfinderSection
+                beautyControlsPanel
             }
         }
         .onChange(of: fallbackPickerItem) { newItem in
@@ -4769,6 +4398,403 @@ public struct AttendanceLiveBeautyCameraSheet: View {
                 }
                 fallbackPickerItem = nil
             }
+        }
+    }
+
+    @ViewBuilder
+    private var topCameraBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                HapticsManager.selection()
+                dismiss()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .bold))
+                    Text("Đóng")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.16))
+                .clipShape(Capsule())
+            }
+
+            Spacer()
+
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(Color(hex: 0xFBBF24))
+                Text("Camera Chấm Công AI")
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(.white)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.white.opacity(0.14))
+            .clipShape(Capsule())
+
+            Spacer()
+
+            // Screen Ring Light Toggle (Soft Face Illumination in Low Light)
+            Button {
+                HapticsManager.selection()
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isScreenFlashOn.toggle()
+                }
+            } label: {
+                Image(systemName: isScreenFlashOn ? "bolt.fill" : "bolt.slash.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(isScreenFlashOn ? Color.black : Color.white)
+                    .frame(width: 36, height: 36)
+                    .background(isScreenFlashOn ? Color(hex: 0xFBBF24) : Color.white.opacity(0.16))
+                    .clipShape(Circle())
+            }
+            .accessibilityLabel("Đèn bù sáng màn hình")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private var cameraViewfinderSection: some View {
+        ZStack {
+            if let stagedData = (isComparingOriginal ? stagedRawPhotoData : stagedBeautifiedPhotoData) ?? stagedBeautifiedPhotoData,
+               let stagedImage = UIImage(data: stagedData) {
+                Image(uiImage: stagedImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            } else if cameraUnavailable {
+                cameraUnavailableFallbackView
+            } else {
+                AttendanceLiveBeautyCameraRepresentable(
+                    useFrontCamera: useFrontCamera,
+                    preset: isComparingOriginal ? .original : selectedPreset,
+                    intensity: selectedIntensity,
+                    captureTriggerToken: captureTriggerToken,
+                    onFrameCaptured: { rawData in
+                        handleCapturedRawFrame(rawData)
+                    },
+                    onCameraUnavailable: {
+                        cameraUnavailable = true
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+            }
+
+            if isScreenFlashOn {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color(hex: 0xFFFBEB).opacity(0.92),
+                                Color(hex: 0xFEF3C7).opacity(0.85)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 26
+                    )
+                    .allowsHitTesting(false)
+            }
+
+            viewfinderOverlayHud
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 8)
+    }
+
+    @ViewBuilder
+    private var cameraUnavailableFallbackView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "camera.metering.unknown")
+                .font(.system(size: 42, weight: .light))
+                .foregroundColor(.white.opacity(0.8))
+            Text("Thiết bị không có Camera vật lý hoặc chưa cấp quyền Camera.")
+                .font(.subheadline.weight(.medium))
+                .foregroundColor(.white.opacity(0.85))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
+
+            HStack(spacing: 12) {
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    Text("Mở Cài đặt")
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Color.white.opacity(0.2))
+                        .foregroundColor(.white)
+                        .clipShape(Capsule())
+                }
+
+                PhotosPicker(selection: $fallbackPickerItem, matching: .images) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "photo.on.rectangle")
+                        Text("Chọn ảnh thử nghiệm")
+                    }
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(theme.primary)
+                    .foregroundColor(.white)
+                    .clipShape(Capsule())
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var viewfinderOverlayHud: some View {
+        let statusText: String = {
+            if isComparingOriginal {
+                return "Đang xem ảnh gốc"
+            }
+            if selectedPreset == .original {
+                return "Chế độ: Gốc"
+            }
+            return "\(selectedPreset.labelVi) · \(Int(round(selectedIntensity * 100)))%"
+        }()
+
+        VStack {
+            Spacer()
+            HStack(alignment: .center) {
+                HStack(spacing: 6) {
+                    Image(systemName: isComparingOriginal ? "camera.aperture" : selectedPreset.iconName)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Color(hex: 0xFBBF24))
+                    Text(statusText)
+                        .font(.caption2.weight(.bold).monospacedDigit())
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.62))
+                .clipShape(Capsule())
+
+                Spacer()
+
+                if selectedPreset != .original {
+                    HStack(spacing: 5) {
+                        Image(systemName: isComparingOriginal ? "eye.slash.fill" : "eye.fill")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("Giữ xem gốc")
+                            .font(.caption2.weight(.bold))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(isComparingOriginal ? theme.primary : Color.black.opacity(0.62))
+                    .foregroundColor(.white)
+                    .clipShape(Capsule())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { _ in
+                                if !isComparingOriginal {
+                                    HapticsManager.selection()
+                                    isComparingOriginal = true
+                                }
+                            }
+                            .onEnded { _ in
+                                isComparingOriginal = false
+                            }
+                    )
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 12)
+        }
+    }
+
+    @ViewBuilder
+    private var beautyControlsPanel: some View {
+        VStack(spacing: 12) {
+            if selectedPreset != .original {
+                HStack(spacing: 10) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.8))
+                    Text("Làm mịn & Sáng")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.white.opacity(0.85))
+                    Slider(
+                        value: Binding(
+                            get: { selectedIntensity },
+                            set: { newVal in
+                                selectedIntensity = newVal
+                                AttendanceBeautyFilter.saveIntensity(newVal)
+                            }
+                        ),
+                        in: 0.10...1.0,
+                        step: 0.05,
+                        onEditingChanged: { editing in
+                            if !editing {
+                                reapplyStagedPhotoIfNeeded()
+                            }
+                        }
+                    )
+                    .tint(theme.primary)
+                    Text("\(Int(round(selectedIntensity * 100)))%")
+                        .font(.caption2.weight(.bold).monospacedDigit())
+                        .foregroundColor(Color(hex: 0xFBBF24))
+                        .frame(width: 36, alignment: .trailing)
+                }
+                .padding(.horizontal, 16)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(AttendanceBeautyPreset.allCases) { preset in
+                        presetChipButton(for: preset)
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+
+            bottomActionRow
+        }
+        .padding(.top, 12)
+    }
+
+    @ViewBuilder
+    private func presetChipButton(for preset: AttendanceBeautyPreset) -> some View {
+        let isSelected = selectedPreset == preset
+        let fillColor: Color = isSelected ? theme.primary : Color.white.opacity(0.14)
+        let strokeColor: Color = isSelected ? Color.white.opacity(0.9) : Color.white.opacity(0.18)
+
+        Button {
+            HapticsManager.selection()
+            selectedPreset = preset
+            AttendanceBeautyFilter.savePreset(preset)
+            reapplyStagedPhotoIfNeeded()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: preset.iconName)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(preset.labelVi)
+                    .font(.caption.weight(isSelected ? .bold : .medium))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Capsule(style: .continuous).fill(fillColor))
+            .foregroundColor(.white)
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(strokeColor, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var bottomActionRow: some View {
+        if let rawData = stagedRawPhotoData, let beautifiedData = stagedBeautifiedPhotoData {
+            HStack(spacing: 14) {
+                Button {
+                    HapticsManager.selection()
+                    stagedRawPhotoData = nil
+                    stagedBeautifiedPhotoData = nil
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.counterclockwise")
+                        Text("Chụp lại")
+                    }
+                    .font(.subheadline.weight(.bold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .background(Color.white.opacity(0.18))
+                    .clipShape(Capsule())
+                }
+
+                Button {
+                    HapticsManager.success()
+                    onPhotoCaptured(rawData, beautifiedData)
+                    dismiss()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("Dùng ảnh chấm công")
+                    }
+                    .font(.subheadline.weight(.bold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                    .background(SemanticColors.successText)
+                    .clipShape(Capsule())
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+        } else {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(selectedPreset.labelVi)
+                        .font(.caption.weight(.bold))
+                        .foregroundColor(.white)
+                    Text(selectedPreset.subtitleVi)
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.7))
+                        .lineLimit(1)
+                }
+                .frame(width: 110, alignment: .leading)
+
+                Spacer()
+
+                Button {
+                    guard !isProcessingStill else { return }
+                    HapticsManager.mediumImpact()
+                    captureTriggerToken &+= 1
+                } label: {
+                    ZStack {
+                        Circle()
+                            .stroke(Color.white, lineWidth: 4)
+                            .frame(width: 72, height: 72)
+                        Circle()
+                            .fill(theme.primary)
+                            .frame(width: 58, height: 58)
+                        if isProcessingStill {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "camera.fill")
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundColor(.white)
+                        }
+                    }
+                }
+                .disabled(isProcessingStill || cameraUnavailable)
+
+                Spacer()
+
+                Button {
+                    HapticsManager.selection()
+                    useFrontCamera.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "camera.rotate.fill")
+                            .font(.system(size: 14, weight: .bold))
+                        Text(useFrontCamera ? "Cam trước" : "Cam sau")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(Color.white.opacity(0.16))
+                    .clipShape(Capsule())
+                }
+                .frame(width: 110, alignment: .trailing)
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
         }
     }
 
