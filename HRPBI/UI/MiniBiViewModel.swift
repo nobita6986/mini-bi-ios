@@ -49,16 +49,35 @@ public final class MiniBiViewModel: ObservableObject {
     public private(set) var nextAllowedOutboxFlushElapsedMs: Int64 = 0
     public var backoffJitterProvider: () -> Double = { Double.random(in: 0.0...1.0) }
 
-    // MARK: - Notifications (SSE + List) & Local Task Reminders
+    // MARK: - Notifications (SSE + List), Local Task Reminders & HRPartner Bulletin
     @Published public var notifications: [AppNotificationItem] = []
     @Published public var unreadNotificationCount: Int = 0
     @Published public var isNotificationSheetPresented: Bool = false
     @Published public var isTaskReminderSheetPresented: Bool = false
     @Published public var taskReminders: [TaskReminderItem] = []
+    @Published public var isBulletinSheetPresented: Bool = false
+    @Published public var bulletinItems: [HrpBulletinItem] = HrpBulletinItem.defaultMockupItems
+    @Published public var selectedBulletinCategory: HrpBulletinCategory = .all
+    @Published public var selectedBulletinDetailId: String? = nil
     private var announcedNotificationIds: Set<Int64> = []
 
     public var enabledRemindersCount: Int {
         taskReminders.filter { $0.isEnabled }.count
+    }
+
+    public var filteredBulletinItems: [HrpBulletinItem] {
+        if selectedBulletinCategory == .all {
+            return bulletinItems
+        }
+        return bulletinItems.filter { $0.category == selectedBulletinCategory }
+    }
+
+    public var pinnedBulletinCount: Int {
+        bulletinItems.filter { $0.isPinned }.count
+    }
+
+    public var unreadBulletinCount: Int {
+        bulletinItems.filter { !$0.isRead }.count
     }
 
     // MARK: - Dashboard & CCCD Review State
@@ -478,6 +497,133 @@ public final class MiniBiViewModel: ObservableObject {
                 self?.taskReminders = updated
             }
         }
+
+        TaskReminderNotificationDelegate.shared.onOpenBulletinNotification = { [weak self] bulletinId in
+            Task { @MainActor [weak self] in
+                self?.openBulletinFromNotification(bulletinId: bulletinId)
+            }
+        }
+
+        reloadBulletins()
+    }
+
+    // MARK: - HRPartner Bulletin ("Bản tin HRPartner" — Local isRead + Notification Persistence + /api/bulletins Contract Gate)
+
+    private func loadPersistedReadBulletinIds() -> Set<String> {
+        let arr = UserDefaults.standard.stringArray(forKey: HrpBulletinContract.readBulletinIdsStorageKey) ?? []
+        return Set(arr.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+    }
+
+    private func savePersistedReadBulletinIds(_ ids: Set<String>) {
+        UserDefaults.standard.set(Array(ids).sorted(), forKey: HrpBulletinContract.readBulletinIdsStorageKey)
+    }
+
+    private func loadPersistedNotifiedBulletinIds() -> Set<String> {
+        let arr = UserDefaults.standard.stringArray(forKey: HrpBulletinContract.notifiedBulletinIdsStorageKey) ?? []
+        return Set(arr.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+    }
+
+    private func savePersistedNotifiedBulletinIds(_ ids: Set<String>) {
+        UserDefaults.standard.set(Array(ids).sorted(), forKey: HrpBulletinContract.notifiedBulletinIdsStorageKey)
+    }
+
+    public func reloadBulletins(notifyNewItems: Bool = false) {
+        let readIds = loadPersistedReadBulletinIds()
+        if !HrpBulletinContract.REMOTE_API_ENABLED {
+            bulletinItems = HrpBulletinItem.defaultMockupItems.map { item in
+                var copy = item
+                if readIds.contains(copy.id) {
+                    copy.isRead = true
+                }
+                return copy
+            }
+        }
+        if notifyNewItems {
+            _ = notifyUnannouncedBulletinsIfNeeded(postSystemNotification: true)
+        }
+    }
+
+    /// Detects unread bulletins that have not yet been announced on this device, marks them as announced,
+    /// and optionally posts a native iOS system notification + in-app banner.
+    @discardableResult
+    public func notifyUnannouncedBulletinsIfNeeded(postSystemNotification: Bool = false) -> [HrpBulletinItem] {
+        var notifiedIds = loadPersistedNotifiedBulletinIds()
+        let readIds = loadPersistedReadBulletinIds()
+        var newlyDiscovered: [HrpBulletinItem] = []
+
+        for item in bulletinItems where !item.isRead && !readIds.contains(item.id) && !notifiedIds.contains(item.id) {
+            notifiedIds.insert(item.id)
+            newlyDiscovered.append(item)
+        }
+
+        if !newlyDiscovered.isEmpty {
+            savePersistedNotifiedBulletinIds(notifiedIds)
+            if let latest = newlyDiscovered.first {
+                if postSystemNotification {
+                    taskReminderManager.postBulletinSystemNotification(bulletin: latest, delaySeconds: 1.0)
+                }
+                showBanner("Bản tin HRPartner mới: \(latest.title)", isError: false)
+            }
+        }
+        return newlyDiscovered
+    }
+
+    /// Opens the HRPartner Bulletin sheet and navigates directly to the specified bulletin detail (if matched).
+    public func openBulletinFromNotification(bulletinId: String) {
+        let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
+        reloadBulletins(notifyNewItems: false)
+        selectedBulletinCategory = .all
+        if !cleanId.isEmpty, bulletinItems.contains(where: { $0.id == cleanId }) {
+            markBulletinRead(cleanId)
+            selectedBulletinDetailId = cleanId
+        } else {
+            selectedBulletinDetailId = nil
+        }
+        isBulletinSheetPresented = true
+    }
+
+    /// Fires a sample iOS system notification for the latest HRPartner bulletin so UAT can verify banner + deep-link behavior.
+    public func triggerSampleBulletinNotification(bulletin: HrpBulletinItem? = nil) {
+        guard let target = bulletin ?? bulletinItems.first else { return }
+        taskReminderManager.postBulletinSystemNotification(bulletin: target, delaySeconds: 1.5)
+        showBanner("Đã gửi thông báo Bản tin: \(target.title)", isError: false)
+    }
+
+    public func markBulletinRead(_ bulletinId: String) {
+        let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+        var readIds = loadPersistedReadBulletinIds()
+        readIds.insert(cleanId)
+        savePersistedReadBulletinIds(readIds)
+
+        var notifiedIds = loadPersistedNotifiedBulletinIds()
+        if notifiedIds.insert(cleanId).inserted {
+            savePersistedNotifiedBulletinIds(notifiedIds)
+        }
+
+        for idx in bulletinItems.indices where bulletinItems[idx].id == cleanId {
+            bulletinItems[idx].isRead = true
+        }
+    }
+
+    public func markAllBulletinsRead() {
+        var readIds = loadPersistedReadBulletinIds()
+        var notifiedIds = loadPersistedNotifiedBulletinIds()
+        for idx in bulletinItems.indices {
+            readIds.insert(bulletinItems[idx].id)
+            notifiedIds.insert(bulletinItems[idx].id)
+            bulletinItems[idx].isRead = true
+        }
+        savePersistedReadBulletinIds(readIds)
+        savePersistedNotifiedBulletinIds(notifiedIds)
+    }
+
+    public func resetBulletinReadStateForTesting() {
+        UserDefaults.standard.removeObject(forKey: HrpBulletinContract.readBulletinIdsStorageKey)
+        UserDefaults.standard.removeObject(forKey: HrpBulletinContract.notifiedBulletinIdsStorageKey)
+        selectedBulletinDetailId = nil
+        isBulletinSheetPresented = false
+        bulletinItems = HrpBulletinItem.defaultMockupItems
     }
 
     // MARK: - Local Task Reminders ("Nhắc việc")
@@ -916,7 +1062,11 @@ public final class MiniBiViewModel: ObservableObject {
                     if isNew {
                         self.notifications.insert(incomingItem, at: 0)
                         self.unreadNotificationCount = self.notifications.filter { !$0.isRead }.count
-                        if !incomingItem.isRead {
+                        let typeUpper = incomingItem.type.uppercased()
+                        let routeLower = (incomingItem.targetRoute ?? "").lowercased()
+                        if typeUpper.contains("BULLETIN") || routeLower.contains("bulletin") {
+                            self.reloadBulletins(notifyNewItems: true)
+                        } else if !incomingItem.isRead {
                             self.showBanner("Thông báo mới: \(incomingItem.title)", isError: false)
                         }
                     }
@@ -1087,6 +1237,8 @@ public final class MiniBiViewModel: ObservableObject {
             hasExplicitDestinationOverride = true
             currentDestination = .newEntry
             await loadDirectEntryBatchHistory()
+        } else if typeUpper.contains("BULLETIN") || routeLower.contains("bulletin") {
+            openBulletinFromNotification(bulletinId: item.targetEntityId ?? "")
         }
     }
 

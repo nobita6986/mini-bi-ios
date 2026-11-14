@@ -1757,40 +1757,69 @@ final class HRPBTests: XCTestCase {
 
         // Default preset when none saved is .natural ("Tự nhiên")
         XCTAssertEqual(AttendanceBeautyFilter.loadSavedPreset(defaults: customDefaults), .natural)
+        XCTAssertEqual(AttendanceBeautyPreset.allCases.count, 6)
         XCTAssertEqual(AttendanceBeautyPreset.original.labelVi, "Gốc")
         XCTAssertEqual(AttendanceBeautyPreset.natural.labelVi, "Tự nhiên")
         XCTAssertEqual(AttendanceBeautyPreset.brightSmooth.labelVi, "Sáng mịn")
         XCTAssertEqual(AttendanceBeautyPreset.rosy.labelVi, "Hồng hào")
+        XCTAssertEqual(AttendanceBeautyPreset.clearGlow.labelVi, "Trong trẻo")
+        XCTAssertEqual(AttendanceBeautyPreset.backlightHdr.labelVi, "Ngược sáng")
 
         AttendanceBeautyFilter.savePreset(.brightSmooth, defaults: customDefaults)
         XCTAssertEqual(AttendanceBeautyFilter.loadSavedPreset(defaults: customDefaults), .brightSmooth)
+
+        // Default intensity when none saved is 0.80 (80%)
+        XCTAssertEqual(AttendanceBeautyFilter.loadSavedIntensity(defaults: customDefaults), 0.80, accuracy: 0.001)
+        AttendanceBeautyFilter.saveIntensity(0.65, defaults: customDefaults)
+        XCTAssertEqual(AttendanceBeautyFilter.loadSavedIntensity(defaults: customDefaults), 0.65, accuracy: 0.001)
 
         let rawJpeg = try makeSolidTestJpeg(
             color: UIColor(red: 0.72, green: 0.56, blue: 0.48, alpha: 1.0),
             size: CGSize(width: 240, height: 320)
         )
 
-        let originalOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .original, maxDimensionPx: 1600)
-        let naturalOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .natural, maxDimensionPx: 1600)
-        let brightSmoothOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .brightSmooth, maxDimensionPx: 1600)
-        let rosyOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .rosy, maxDimensionPx: 1600)
+        let originalOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .original, intensity: 1.0, maxDimensionPx: 1600)
+        let zeroIntensityOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .brightSmooth, intensity: 0.0, maxDimensionPx: 1600)
+        let naturalOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .natural, intensity: 0.85, maxDimensionPx: 1600)
+        let brightSmoothOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .brightSmooth, intensity: 0.85, maxDimensionPx: 1600)
+        let rosyOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .rosy, intensity: 0.85, maxDimensionPx: 1600)
+        let clearGlowOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .clearGlow, intensity: 0.85, maxDimensionPx: 1600)
+        let backlightHdrOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .backlightHdr, intensity: 0.85, maxDimensionPx: 1600)
 
-        for output in [originalOutput, naturalOutput, brightSmoothOutput, rosyOutput] {
+        for output in [originalOutput, zeroIntensityOutput, naturalOutput, brightSmoothOutput, rosyOutput, clearGlowOutput, backlightHdrOutput] {
             XCTAssertFalse(output.isEmpty)
             let img = try XCTUnwrap(UIImage(data: output))
             XCTAssertEqual(img.size.width, 240, accuracy: 1.0)
             XCTAssertEqual(img.size.height, 320, accuracy: 1.0)
         }
 
-        // Beautified presets should transform the mid-tone skin color compared to original
+        // Beautified presets should transform the mid-tone skin color compared to original, while 0% intensity matches original
         let originalSha = AttendanceContract.computeSha256Hex(originalOutput)
+        let zeroIntensitySha = AttendanceContract.computeSha256Hex(zeroIntensityOutput)
         let naturalSha = AttendanceContract.computeSha256Hex(naturalOutput)
         let brightSmoothSha = AttendanceContract.computeSha256Hex(brightSmoothOutput)
         let rosySha = AttendanceContract.computeSha256Hex(rosyOutput)
+        let clearGlowSha = AttendanceContract.computeSha256Hex(clearGlowOutput)
+        let backlightHdrSha = AttendanceContract.computeSha256Hex(backlightHdrOutput)
 
+        XCTAssertEqual(originalSha, zeroIntensitySha)
         XCTAssertNotEqual(originalSha, naturalSha)
         XCTAssertNotEqual(originalSha, brightSmoothSha)
         XCTAssertNotEqual(originalSha, rosySha)
+        XCTAssertNotEqual(originalSha, clearGlowSha)
+        XCTAssertNotEqual(originalSha, backlightHdrSha)
+
+        // Verify live camera CIImage pipeline with cached face bounding boxes
+        let inputCI = try XCTUnwrap(CIImage(data: rawJpeg))
+        let liveOutputCI = AttendanceBeautyFilter.applyToCIImage(
+            inputCI,
+            preset: .clearGlow,
+            intensity: 0.80,
+            detectFaceLandmarks: false,
+            cachedFaceBoundingBoxes: [CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)]
+        )
+        XCTAssertEqual(liveOutputCI.extent.width, inputCI.extent.width, accuracy: 1.0)
+        XCTAssertEqual(liveOutputCI.extent.height, inputCI.extent.height, accuracy: 1.0)
     }
 
     @MainActor
@@ -5704,5 +5733,136 @@ final class HRPBTests: XCTestCase {
         XCTAssertEqual(vm.generalOverviewSnapshot?.scopeDescription, "Cá nhân & dự án phụ trách")
         XCTAssertEqual(vm.generalOverviewSnapshot?.totalProfiles, 0)
         XCTAssertNil(vm.selectedTeamReport)
+    }
+
+    @MainActor
+    func testRound9_HrpBulletinMockupItemsAndCategoryFilter() throws {
+        XCTAssertFalse(HrpBulletinContract.REMOTE_API_ENABLED)
+        XCTAssertEqual(
+            HrpBulletinContract.buildListPath(category: .hrNews, pageSize: 20, cursor: "cur_1"),
+            "/api/bulletins?category=HR_NEWS&page_size=20&cursor=cur_1"
+        )
+        XCTAssertEqual(
+            HrpBulletinContract.buildDetailPath(bulletinId: "bul_20261113_001"),
+            "/api/bulletins/bul_20261113_001"
+        )
+        XCTAssertEqual(
+            HrpBulletinContract.buildMarkReadPath(bulletinId: "bul_20261113_001"),
+            "/api/bulletins/bul_20261113_001/read"
+        )
+
+        let vm = MiniBiViewModel()
+        vm.resetBulletinReadStateForTesting()
+        defer { vm.resetBulletinReadStateForTesting() }
+
+        XCTAssertFalse(vm.isBulletinSheetPresented)
+        XCTAssertEqual(vm.selectedBulletinCategory, .all)
+        XCTAssertEqual(vm.bulletinItems.count, 3)
+        XCTAssertEqual(vm.pinnedBulletinCount, 2)
+        XCTAssertEqual(vm.unreadBulletinCount, 3)
+        XCTAssertTrue(vm.bulletinItems.contains(where: { $0.title == "Tin nhân sự ngày 13-11-2026" }))
+        XCTAssertTrue(vm.bulletinItems.contains(where: { $0.title == "Lịch nghỉ lễ ngày Văn hóa Việt Nam" }))
+
+        vm.selectedBulletinCategory = .hrNews
+        XCTAssertEqual(vm.filteredBulletinItems.count, 1)
+        let hrBulletin = try XCTUnwrap(vm.filteredBulletinItems.first)
+        XCTAssertEqual(hrBulletin.title, "Tin nhân sự ngày 13-11-2026")
+        XCTAssertEqual(hrBulletin.imageAttachments.count, 1)
+        XCTAssertEqual(hrBulletin.pdfAttachments.count, 1)
+        XCTAssertEqual(hrBulletin.attachmentSummary.imageCount, 1)
+        XCTAssertEqual(hrBulletin.attachmentSummary.pdfCount, 1)
+
+        // Verify UIGraphicsImageRenderer & UIGraphicsPDFRenderer 2-page PDF generation
+        let imageAtt = try XCTUnwrap(hrBulletin.imageAttachments.first)
+        let generatedImg = HrpBulletinMockupMediaGenerator.sampleImage(for: imageAtt, bulletin: hrBulletin)
+        XCTAssertGreaterThan(generatedImg.size.width, 0)
+        XCTAssertGreaterThan(generatedImg.size.height, 0)
+
+        // Verify HrpCenteringZoomScrollView aspect-fit centering (no top-left clipping at 1x or 2x zoom)
+        let zoomScroll = HrpCenteringZoomScrollView(image: generatedImg)
+        zoomScroll.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        zoomScroll.layoutSubviews()
+        XCTAssertEqual(zoomScroll.imageView.frame.origin, .zero)
+        XCTAssertEqual(zoomScroll.imageView.frame.width, 390, accuracy: 1.0)
+        XCTAssertGreaterThan(zoomScroll.contentInset.top, 200)
+        zoomScroll.setZoomScale(2.0, animated: false)
+        zoomScroll.scrollViewDidZoom(zoomScroll)
+        XCTAssertEqual(zoomScroll.contentSize.width, 780, accuracy: 2.0)
+
+        let pdfAtt = try XCTUnwrap(hrBulletin.pdfAttachments.first)
+        let pdfUrl = try XCTUnwrap(HrpBulletinMockupMediaGenerator.samplePdfUrl(for: pdfAtt, bulletin: hrBulletin))
+        let pdfDoc = try XCTUnwrap(PDFDocument(url: pdfUrl))
+        XCTAssertEqual(pdfDoc.pageCount, 2)
+
+        vm.selectedBulletinCategory = .holidaySchedule
+        XCTAssertEqual(vm.filteredBulletinItems.count, 1)
+        XCTAssertEqual(vm.filteredBulletinItems.first?.title, "Lịch nghỉ lễ ngày Văn hóa Việt Nam")
+
+        // Verify local isRead & notification announcement persistence across ViewModel instances
+        let unannounced = vm.notifyUnannouncedBulletinsIfNeeded(postSystemNotification: false)
+        XCTAssertEqual(unannounced.count, 3)
+        // Second call returns empty because all 3 have now been announced
+        XCTAssertTrue(vm.notifyUnannouncedBulletinsIfNeeded(postSystemNotification: false).isEmpty)
+
+        vm.openBulletinFromNotification(bulletinId: "bulletin-hr-news-2026-11-13")
+        XCTAssertTrue(vm.isBulletinSheetPresented)
+        XCTAssertEqual(vm.selectedBulletinDetailId, "bulletin-hr-news-2026-11-13")
+        XCTAssertEqual(vm.unreadBulletinCount, 2)
+        XCTAssertEqual(vm.bulletinItems.first(where: { $0.id == "bulletin-hr-news-2026-11-13" })?.isRead, true)
+
+        let vmReloaded = MiniBiViewModel()
+        XCTAssertEqual(vmReloaded.unreadBulletinCount, 2)
+        XCTAssertEqual(vmReloaded.bulletinItems.first(where: { $0.id == "bulletin-hr-news-2026-11-13" })?.isRead, true)
+
+        vmReloaded.markAllBulletinsRead()
+        XCTAssertEqual(vmReloaded.unreadBulletinCount, 0)
+
+        // Verify /api/bulletins JSON contract parser
+        let parsedContractBulletin = try XCTUnwrap(HrpBulletinContract.parseBulletinItem([
+            "id": "bul_20261113_999",
+            "category": "HOLIDAY_SCHEDULE",
+            "category_display": "Lịch nghỉ lễ",
+            "title": "Lịch nghỉ lễ ngày Văn hóa Việt Nam",
+            "summary": "Tóm tắt bản tin nghỉ lễ",
+            "content_sections": ["Đoạn 1", "Đoạn 2"],
+            "published_at": "2026-11-13T08:00:00Z",
+            "published_date_display": "13-11-2026",
+            "author_display": "Phòng HCNS",
+            "is_pinned": true,
+            "is_read": false,
+            "attachment_summary": [
+                "image_count": 1,
+                "pdf_count": 1
+            ],
+            "attachments": [
+                [
+                    "id": "att_img_999",
+                    "kind": "IMAGE",
+                    "file_name": "banner.jpg",
+                    "title": "Banner thông báo",
+                    "mime_type": "image/jpeg",
+                    "file_size_bytes": 384210,
+                    "url": "https://bi.hrpartner.vn/api/bulletins/bul_20261113_999/attachments/att_img_999/content",
+                    "thumbnail_url": "https://bi.hrpartner.vn/api/bulletins/bul_20261113_999/attachments/att_img_999/thumbnail",
+                    "width": 1600,
+                    "height": 900
+                ],
+                [
+                    "id": "att_pdf_999",
+                    "kind": "PDF",
+                    "file_name": "quyet-dinh.pdf",
+                    "title": "Quyết định nghỉ lễ",
+                    "mime_type": "application/pdf",
+                    "file_size_bytes": 1245184,
+                    "url": "https://bi.hrpartner.vn/api/bulletins/bul_20261113_999/attachments/att_pdf_999/content",
+                    "page_count": 2
+                ]
+            ]
+        ]))
+        XCTAssertEqual(parsedContractBulletin.id, "bul_20261113_999")
+        XCTAssertEqual(parsedContractBulletin.category, .holidaySchedule)
+        XCTAssertEqual(parsedContractBulletin.imageAttachments.count, 1)
+        XCTAssertEqual(parsedContractBulletin.pdfAttachments.count, 1)
+        XCTAssertEqual(parsedContractBulletin.pdfAttachments.first?.pageCount, 2)
     }
 }
