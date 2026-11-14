@@ -5,13 +5,15 @@ import Network
 import CoreImage
 import Vision
 
-// MARK: - Attendance Beauty Filter (Post-Capture CoreImage + Vision Portrait Enhancement)
+// MARK: - Attendance Beauty Filter (Real-Time Live Camera + Post-Capture CoreImage & Vision Landmarks Portrait Enhancement)
 
 public enum AttendanceBeautyPreset: String, CaseIterable, Identifiable, Sendable {
     case original = "ORIGINAL"
     case natural = "NATURAL"
     case brightSmooth = "BRIGHT_SMOOTH"
     case rosy = "ROSY"
+    case clearGlow = "CLEAR_GLOW"
+    case backlightHdr = "BACKLIGHT_HDR"
 
     public var id: String { rawValue }
 
@@ -25,6 +27,27 @@ public enum AttendanceBeautyPreset: String, CaseIterable, Identifiable, Sendable
             return "Sáng mịn"
         case .rosy:
             return "Hồng hào"
+        case .clearGlow:
+            return "Trong trẻo"
+        case .backlightHdr:
+            return "Ngược sáng"
+        }
+    }
+
+    public var subtitleVi: String {
+        switch self {
+        case .original:
+            return "Ảnh gốc từ ống kính, không qua bộ lọc"
+        case .natural:
+            return "Mịn da nhẹ, giữ nét mắt & môi tự nhiên"
+        case .brightSmooth:
+            return "Nâng tông sáng mịn, che khuyết điểm da"
+        case .rosy:
+            return "Da ấm áp, tươi tắn hồng hào"
+        case .clearGlow:
+            return "Tông trắng trong trẻo, sắc nét Hàn Quốc"
+        case .backlightHdr:
+            return "Cứu sáng khuôn mặt khi đứng ngược nắng / sảnh tối"
         }
     }
 
@@ -38,13 +61,20 @@ public enum AttendanceBeautyPreset: String, CaseIterable, Identifiable, Sendable
             return "sun.max.fill"
         case .rosy:
             return "wand.and.stars"
+        case .clearGlow:
+            return "drop.halffull"
+        case .backlightHdr:
+            return "sun.haze.fill"
         }
     }
 }
 
 public enum AttendanceBeautyFilter {
     private static let presetDefaultsKey = "hrpbi.attendance.beauty_preset.v1"
-    private static let sharedCIContext: CIContext = {
+    private static let intensityDefaultsKey = "hrpbi.attendance.beauty_intensity.v1"
+    public static let defaultIntensity: Double = 0.80
+
+    public static let sharedCIContext: CIContext = {
         CIContext(options: [
             .useSoftwareRenderer: false,
             .priorityRequestLow: false
@@ -63,21 +93,36 @@ public enum AttendanceBeautyFilter {
         defaults.set(preset.rawValue, forKey: presetDefaultsKey)
     }
 
-    /// Applies the selected portrait beauty preset to a raw/normalized JPEG image.
+    public static func loadSavedIntensity(defaults: UserDefaults = .standard) -> Double {
+        guard defaults.object(forKey: intensityDefaultsKey) != nil else {
+            return defaultIntensity
+        }
+        let raw = defaults.double(forKey: intensityDefaultsKey)
+        return min(max(raw, 0.0), 1.0)
+    }
+
+    public static func saveIntensity(_ intensity: Double, defaults: UserDefaults = .standard) {
+        let clamped = min(max(intensity, 0.0), 1.0)
+        defaults.set(clamped, forKey: intensityDefaultsKey)
+    }
+
+    /// Applies the selected portrait beauty preset and intensity (`0.0`–`1.0`) to a raw/normalized JPEG image.
     /// Guarantees upright orientation and bounded dimensions (`maxDimensionPx`),
     /// returning valid JPEG bytes ready for preview and SHA-256 check-in submission.
     public static func apply(
         to rawData: Data,
         preset: AttendanceBeautyPreset,
+        intensity: Double = 1.0,
         maxDimensionPx: CGFloat = 1600,
         compressionQuality: CGFloat = 0.85
     ) -> Data {
+        let clampedIntensity = min(max(intensity, 0.0), 1.0)
         let normalizedData = AttendanceContract.normalizeCameraJpeg(
             rawData,
             maxDimensionPx: maxDimensionPx,
             compressionQuality: max(compressionQuality, 0.88)
         )
-        guard preset != .original else {
+        guard preset != .original, clampedIntensity > 0.01 else {
             if compressionQuality < 0.88 {
                 return AttendanceContract.normalizeCameraJpeg(
                     normalizedData,
@@ -98,11 +143,46 @@ public enum AttendanceBeautyFilter {
             return normalizedData
         }
 
-        let params = filterParameters(for: preset)
+        let working = applyToCIImage(
+            baseCIImage,
+            preset: preset,
+            intensity: clampedIntensity,
+            detectFaceLandmarks: true
+        )
+
+        guard let cgImage = sharedCIContext.createCGImage(working, from: extent) else {
+            return normalizedData
+        }
+
+        let filteredUIImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
+        if let jpeg = filteredUIImage.jpegData(compressionQuality: compressionQuality), !jpeg.isEmpty {
+            return jpeg
+        }
+        return normalizedData
+    }
+
+    /// Real-time & Still-photo CoreImage beauty pipeline.
+    /// When `detectFaceLandmarks` is true (still capture), runs `VNDetectFaceLandmarksRequest` to smooth cheek/forehead skin
+    /// while protecting eyes, eyebrows, and lips. During 30fps live camera preview (`detectFaceLandmarks == false`),
+    /// uses `cachedFaceBoundingBoxes` detected asynchronously by the camera pipeline.
+    public static func applyToCIImage(
+        _ baseCIImage: CIImage,
+        preset: AttendanceBeautyPreset,
+        intensity: Double = 1.0,
+        detectFaceLandmarks: Bool = true,
+        cachedFaceBoundingBoxes: [CGRect] = []
+    ) -> CIImage {
+        let clampedIntensity = CGFloat(min(max(intensity, 0.0), 1.0))
+        let extent = baseCIImage.extent
+        guard preset != .original, clampedIntensity > 0.01, !extent.isEmpty, extent.width > 1, extent.height > 1 else {
+            return baseCIImage
+        }
+
+        let params = scaledParameters(for: preset, intensity: clampedIntensity)
         var working = baseCIImage
 
         // 1. Exposure & Backlight Shadow Recovery
-        if let exposure = CIFilter(name: "CIExposureAdjust") {
+        if abs(params.exposureEV) > 0.001, let exposure = CIFilter(name: "CIExposureAdjust") {
             exposure.setValue(working, forKey: kCIInputImageKey)
             exposure.setValue(params.exposureEV, forKey: kCIInputEVKey)
             if let out = exposure.outputImage {
@@ -119,23 +199,56 @@ public enum AttendanceBeautyFilter {
             }
         }
 
-        // 2. Skin Smoothing (Noise reduction + soft frequency blend + face-aware mask boost)
+        // 2. Soft S-Curve Midtone Skin Lift (CIToneCurve)
+        if params.midtoneLift > 0.001, let toneCurve = CIFilter(name: "CIToneCurve") {
+            let lift = params.midtoneLift
+            toneCurve.setValue(working, forKey: kCIInputImageKey)
+            toneCurve.setValue(CIVector(x: 0.0, y: 0.0), forKey: "inputPoint0")
+            toneCurve.setValue(CIVector(x: 0.25, y: min(0.45, 0.25 + lift * 0.65)), forKey: "inputPoint1")
+            toneCurve.setValue(CIVector(x: 0.50, y: min(0.72, 0.50 + lift)), forKey: "inputPoint2")
+            toneCurve.setValue(CIVector(x: 0.75, y: min(0.92, 0.75 + lift * 0.45)), forKey: "inputPoint3")
+            toneCurve.setValue(CIVector(x: 1.0, y: 1.0), forKey: "inputPoint4")
+            if let out = toneCurve.outputImage?.cropped(to: extent) {
+                working = out
+            }
+        }
+
+        // 3. Skin Smoothing (Noise reduction + Face-Landmark-Aware Frequency Blend that protects eyes, eyebrows & lips)
         var denoised = working
         if let nr = CIFilter(name: "CINoiseReduction") {
             nr.setValue(working, forKey: kCIInputImageKey)
-            nr.setValue(0.025, forKey: "inputNoiseLevel")
+            nr.setValue(0.025 * clampedIntensity, forKey: "inputNoiseLevel")
             nr.setValue(0.40, forKey: "inputSharpness")
             if let out = nr.outputImage?.cropped(to: extent) {
                 denoised = out
             }
         }
 
-        if let blur = CIFilter(name: "CIGaussianBlur") {
+        if params.blurRadius > 0.1, let blur = CIFilter(name: "CIGaussianBlur") {
             blur.setValue(denoised.clampedToExtent(), forKey: kCIInputImageKey)
             blur.setValue(params.blurRadius, forKey: kCIInputRadiusKey)
             if let blurred = blur.outputImage?.cropped(to: extent) {
-                if let faceMask = buildFaceSmoothingMask(for: baseCIImage, extent: extent, baseOpacity: params.smoothingBlend, facePeakOpacity: min(0.75, params.smoothingBlend + 0.18)),
-                   let blendMask = CIFilter(name: "CIBlendWithMask") {
+                let faceMask: CIImage? = {
+                    if detectFaceLandmarks {
+                        return buildFaceSmoothingMaskWithLandmarks(
+                            for: baseCIImage,
+                            extent: extent,
+                            baseOpacity: params.smoothingBlend,
+                            facePeakOpacity: min(0.78, params.smoothingBlend + 0.20 * clampedIntensity)
+                        )
+                    } else if !cachedFaceBoundingBoxes.isEmpty {
+                        return buildFastFaceBoxSmoothingMask(
+                            faceBoundingBoxes: cachedFaceBoundingBoxes,
+                            extent: extent,
+                            baseOpacity: params.smoothingBlend,
+                            facePeakOpacity: min(0.76, params.smoothingBlend + 0.18 * clampedIntensity)
+                        )
+                    } else {
+                        return nil
+                    }
+                }()
+
+                if let faceMask, let blendMask = CIFilter(name: "CIBlendWithMask") {
                     blendMask.setValue(blurred, forKey: kCIInputImageKey)
                     blendMask.setValue(denoised, forKey: kCIInputBackgroundImageKey)
                     blendMask.setValue(faceMask, forKey: kCIInputMaskImageKey)
@@ -153,8 +266,8 @@ public enum AttendanceBeautyFilter {
             }
         }
 
-        // Restore crispness on eyes, eyebrows, hair, and facial contours
-        if let sharpen = CIFilter(name: "CISharpenLuminance") {
+        // Restore crispness on eyes, eyebrows, eyelashes, hair, and facial contours
+        if params.sharpenLuminance > 0.01, let sharpen = CIFilter(name: "CISharpenLuminance") {
             sharpen.setValue(working, forKey: kCIInputImageKey)
             sharpen.setValue(params.sharpenLuminance, forKey: kCIInputSharpnessKey)
             sharpen.setValue(1.5, forKey: kCIInputRadiusKey)
@@ -163,7 +276,7 @@ public enum AttendanceBeautyFilter {
             }
         }
 
-        // 3. Warm / Rosy Skin Tone & Soft Contrast
+        // 4. Warm / Rosy / Clear Skin Tone & Soft Contrast
         if let tempTint = CIFilter(name: "CITemperatureAndTint") {
             tempTint.setValue(working, forKey: kCIInputImageKey)
             tempTint.setValue(CIVector(x: 6500, y: 0), forKey: "inputNeutral")
@@ -183,21 +296,14 @@ public enum AttendanceBeautyFilter {
             }
         }
 
-        guard let cgImage = sharedCIContext.createCGImage(working, from: extent) else {
-            return normalizedData
-        }
-
-        let filteredUIImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
-        if let jpeg = filteredUIImage.jpegData(compressionQuality: compressionQuality), !jpeg.isEmpty {
-            return jpeg
-        }
-        return normalizedData
+        return working
     }
 
     private struct FilterParameters {
         let exposureEV: CGFloat
         let shadowAmount: CGFloat
         let highlightAmount: CGFloat
+        let midtoneLift: CGFloat
         let blurRadius: CGFloat
         let smoothingBlend: CGFloat
         let sharpenLuminance: CGFloat
@@ -208,6 +314,25 @@ public enum AttendanceBeautyFilter {
         let saturation: CGFloat
     }
 
+    private static func scaledParameters(for preset: AttendanceBeautyPreset, intensity: CGFloat) -> FilterParameters {
+        let base = filterParameters(for: preset)
+        let t = min(max(intensity, 0.0), 1.0)
+        return FilterParameters(
+            exposureEV: base.exposureEV * t,
+            shadowAmount: base.shadowAmount * t,
+            highlightAmount: 1.0 - (1.0 - base.highlightAmount) * t,
+            midtoneLift: base.midtoneLift * t,
+            blurRadius: base.blurRadius * max(0.35, t),
+            smoothingBlend: base.smoothingBlend * t,
+            sharpenLuminance: base.sharpenLuminance * t,
+            targetTemp: 6500.0 + (base.targetTemp - 6500.0) * t,
+            targetTint: base.targetTint * t,
+            brightness: base.brightness * t,
+            contrast: 1.0 + (base.contrast - 1.0) * t,
+            saturation: 1.0 + (base.saturation - 1.0) * t
+        )
+    }
+
     private static func filterParameters(for preset: AttendanceBeautyPreset) -> FilterParameters {
         switch preset {
         case .original:
@@ -215,6 +340,7 @@ public enum AttendanceBeautyFilter {
                 exposureEV: 0.0,
                 shadowAmount: 0.0,
                 highlightAmount: 1.0,
+                midtoneLift: 0.0,
                 blurRadius: 0.0,
                 smoothingBlend: 0.0,
                 sharpenLuminance: 0.0,
@@ -229,6 +355,7 @@ public enum AttendanceBeautyFilter {
                 exposureEV: 0.16,
                 shadowAmount: 0.25,
                 highlightAmount: 0.92,
+                midtoneLift: 0.032,
                 blurRadius: 2.8,
                 smoothingBlend: 0.34,
                 sharpenLuminance: 0.32,
@@ -243,6 +370,7 @@ public enum AttendanceBeautyFilter {
                 exposureEV: 0.30,
                 shadowAmount: 0.38,
                 highlightAmount: 0.88,
+                midtoneLift: 0.055,
                 blurRadius: 4.2,
                 smoothingBlend: 0.50,
                 sharpenLuminance: 0.38,
@@ -257,6 +385,7 @@ public enum AttendanceBeautyFilter {
                 exposureEV: 0.22,
                 shadowAmount: 0.30,
                 highlightAmount: 0.90,
+                midtoneLift: 0.040,
                 blurRadius: 3.2,
                 smoothingBlend: 0.40,
                 sharpenLuminance: 0.34,
@@ -266,18 +395,48 @@ public enum AttendanceBeautyFilter {
                 contrast: 0.975,
                 saturation: 1.10
             )
+        case .clearGlow:
+            return FilterParameters(
+                exposureEV: 0.25,
+                shadowAmount: 0.32,
+                highlightAmount: 0.89,
+                midtoneLift: 0.050,
+                blurRadius: 3.5,
+                smoothingBlend: 0.44,
+                sharpenLuminance: 0.45,
+                targetTemp: 6620,
+                targetTint: -10,
+                brightness: 0.022,
+                contrast: 0.985,
+                saturation: 1.03
+            )
+        case .backlightHdr:
+            return FilterParameters(
+                exposureEV: 0.38,
+                shadowAmount: 0.62,
+                highlightAmount: 0.78,
+                midtoneLift: 0.068,
+                blurRadius: 3.4,
+                smoothingBlend: 0.42,
+                sharpenLuminance: 0.40,
+                targetTemp: 6280,
+                targetTint: -8,
+                brightness: 0.028,
+                contrast: 0.955,
+                saturation: 1.06
+            )
         }
     }
 
-    /// Detects faces via Vision and builds a soft radial mask that boosts skin smoothing
-    /// on facial regions while keeping a baseline smoothing level across the rest of the frame.
-    private static func buildFaceSmoothingMask(
+    /// Detects faces & facial landmarks (`leftEye`, `rightEye`, `leftEyebrow`, `rightEyebrow`, `outerLips`) via Vision.
+    /// Boosts skin smoothing on cheeks/forehead/chin while carving out protective sharp zones over eyes, eyebrows, and lips.
+    private static func buildFaceSmoothingMaskWithLandmarks(
         for image: CIImage,
         extent: CGRect,
         baseOpacity: CGFloat,
         facePeakOpacity: CGFloat
     ) -> CIImage? {
-        let request = VNDetectFaceRectanglesRequest()
+        let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(ciImage: image, options: [:])
         do {
             try handler.perform([request])
@@ -291,10 +450,100 @@ public enum AttendanceBeautyFilter {
 
         let baseColor = CIColor(red: baseOpacity, green: baseOpacity, blue: baseOpacity, alpha: 1.0)
         let peakColor = CIColor(red: facePeakOpacity, green: facePeakOpacity, blue: facePeakOpacity, alpha: 1.0)
+        let sharpFeatureColor = CIColor(red: max(0.04, baseOpacity * 0.25), green: max(0.04, baseOpacity * 0.25), blue: max(0.04, baseOpacity * 0.25), alpha: 1.0)
         var compositeMask = CIImage(color: baseColor).cropped(to: extent)
 
         for face in faces {
             let bbox = face.boundingBox
+            let faceRect = CGRect(
+                x: extent.minX + bbox.minX * extent.width,
+                y: extent.minY + bbox.minY * extent.height,
+                width: bbox.width * extent.width,
+                height: bbox.height * extent.height
+            )
+            let centerX = faceRect.midX
+            let centerY = faceRect.midY
+            let faceRadius = max(faceRect.width, faceRect.height) * 0.72
+            guard faceRadius > 8,
+                  let radial = CIFilter(name: "CIRadialGradient") else {
+                continue
+            }
+            radial.setValue(CIVector(x: centerX, y: centerY), forKey: "inputCenter")
+            radial.setValue(faceRadius * 0.45, forKey: "inputRadius0")
+            radial.setValue(faceRadius * 1.15, forKey: "inputRadius1")
+            radial.setValue(peakColor, forKey: "inputColor0")
+            radial.setValue(baseColor, forKey: "inputColor1")
+            if let faceGradient = radial.outputImage?.cropped(to: extent),
+               let lighten = CIFilter(name: "CIMaximumCompositing") {
+                lighten.setValue(faceGradient, forKey: kCIInputImageKey)
+                lighten.setValue(compositeMask, forKey: kCIInputBackgroundImageKey)
+                if let merged = lighten.outputImage?.cropped(to: extent) {
+                    compositeMask = merged
+                }
+            }
+
+            // Carve out sharp detail protection zones for Eyes, Eyebrows & Lips
+            if let landmarks = face.landmarks {
+                let protectedRegions: [VNFaceLandmarkRegion2D?] = [
+                    landmarks.leftEye,
+                    landmarks.rightEye,
+                    landmarks.leftEyebrow,
+                    landmarks.rightEyebrow,
+                    landmarks.outerLips
+                ]
+                for region in protectedRegions.compactMap({ $0 }) {
+                    let pts = region.normalizedPoints
+                    guard !pts.isEmpty else { continue }
+                    var minX: CGFloat = 1.0
+                    var maxX: CGFloat = 0.0
+                    var minY: CGFloat = 1.0
+                    var maxY: CGFloat = 0.0
+                    for p in pts {
+                        minX = min(minX, p.x)
+                        maxX = max(maxX, p.x)
+                        minY = min(minY, p.y)
+                        maxY = max(maxY, p.y)
+                    }
+                    let featureCenterX = faceRect.minX + ((minX + maxX) * 0.5) * faceRect.width
+                    let featureCenterY = faceRect.minY + ((minY + maxY) * 0.5) * faceRect.height
+                    let featureRadius = max((maxX - minX) * faceRect.width, (maxY - minY) * faceRect.height) * 0.65
+                    guard featureRadius > 3,
+                          let protectRadial = CIFilter(name: "CIRadialGradient") else {
+                        continue
+                    }
+                    protectRadial.setValue(CIVector(x: featureCenterX, y: featureCenterY), forKey: "inputCenter")
+                    protectRadial.setValue(featureRadius * 0.40, forKey: "inputRadius0")
+                    protectRadial.setValue(featureRadius * 1.15, forKey: "inputRadius1")
+                    protectRadial.setValue(sharpFeatureColor, forKey: "inputColor0")
+                    protectRadial.setValue(CIColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0), forKey: "inputColor1")
+                    if let protectGradient = protectRadial.outputImage?.cropped(to: extent),
+                       let darken = CIFilter(name: "CIMinimumCompositing") {
+                        darken.setValue(protectGradient, forKey: kCIInputImageKey)
+                        darken.setValue(compositeMask, forKey: kCIInputBackgroundImageKey)
+                        if let protectedMask = darken.outputImage?.cropped(to: extent) {
+                            compositeMask = protectedMask
+                        }
+                    }
+                }
+            }
+        }
+
+        return compositeMask
+    }
+
+    /// Fast radial smoothing mask builder for 30fps live camera preview using cached normalized Vision face bounding boxes.
+    private static func buildFastFaceBoxSmoothingMask(
+        faceBoundingBoxes: [CGRect],
+        extent: CGRect,
+        baseOpacity: CGFloat,
+        facePeakOpacity: CGFloat
+    ) -> CIImage? {
+        guard !faceBoundingBoxes.isEmpty else { return nil }
+        let baseColor = CIColor(red: baseOpacity, green: baseOpacity, blue: baseOpacity, alpha: 1.0)
+        let peakColor = CIColor(red: facePeakOpacity, green: facePeakOpacity, blue: facePeakOpacity, alpha: 1.0)
+        var compositeMask = CIImage(color: baseColor).cropped(to: extent)
+
+        for bbox in faceBoundingBoxes {
             let centerX = extent.minX + bbox.midX * extent.width
             let centerY = extent.minY + bbox.midY * extent.height
             let faceRadius = max(bbox.width * extent.width, bbox.height * extent.height) * 0.72
@@ -316,7 +565,6 @@ public enum AttendanceBeautyFilter {
                 }
             }
         }
-
         return compositeMask
     }
 }

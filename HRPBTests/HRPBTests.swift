@@ -1757,40 +1757,69 @@ final class HRPBTests: XCTestCase {
 
         // Default preset when none saved is .natural ("Tự nhiên")
         XCTAssertEqual(AttendanceBeautyFilter.loadSavedPreset(defaults: customDefaults), .natural)
+        XCTAssertEqual(AttendanceBeautyPreset.allCases.count, 6)
         XCTAssertEqual(AttendanceBeautyPreset.original.labelVi, "Gốc")
         XCTAssertEqual(AttendanceBeautyPreset.natural.labelVi, "Tự nhiên")
         XCTAssertEqual(AttendanceBeautyPreset.brightSmooth.labelVi, "Sáng mịn")
         XCTAssertEqual(AttendanceBeautyPreset.rosy.labelVi, "Hồng hào")
+        XCTAssertEqual(AttendanceBeautyPreset.clearGlow.labelVi, "Trong trẻo")
+        XCTAssertEqual(AttendanceBeautyPreset.backlightHdr.labelVi, "Ngược sáng")
 
         AttendanceBeautyFilter.savePreset(.brightSmooth, defaults: customDefaults)
         XCTAssertEqual(AttendanceBeautyFilter.loadSavedPreset(defaults: customDefaults), .brightSmooth)
+
+        // Default intensity when none saved is 0.80 (80%)
+        XCTAssertEqual(AttendanceBeautyFilter.loadSavedIntensity(defaults: customDefaults), 0.80, accuracy: 0.001)
+        AttendanceBeautyFilter.saveIntensity(0.65, defaults: customDefaults)
+        XCTAssertEqual(AttendanceBeautyFilter.loadSavedIntensity(defaults: customDefaults), 0.65, accuracy: 0.001)
 
         let rawJpeg = try makeSolidTestJpeg(
             color: UIColor(red: 0.72, green: 0.56, blue: 0.48, alpha: 1.0),
             size: CGSize(width: 240, height: 320)
         )
 
-        let originalOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .original, maxDimensionPx: 1600)
-        let naturalOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .natural, maxDimensionPx: 1600)
-        let brightSmoothOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .brightSmooth, maxDimensionPx: 1600)
-        let rosyOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .rosy, maxDimensionPx: 1600)
+        let originalOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .original, intensity: 1.0, maxDimensionPx: 1600)
+        let zeroIntensityOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .brightSmooth, intensity: 0.0, maxDimensionPx: 1600)
+        let naturalOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .natural, intensity: 0.85, maxDimensionPx: 1600)
+        let brightSmoothOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .brightSmooth, intensity: 0.85, maxDimensionPx: 1600)
+        let rosyOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .rosy, intensity: 0.85, maxDimensionPx: 1600)
+        let clearGlowOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .clearGlow, intensity: 0.85, maxDimensionPx: 1600)
+        let backlightHdrOutput = AttendanceBeautyFilter.apply(to: rawJpeg, preset: .backlightHdr, intensity: 0.85, maxDimensionPx: 1600)
 
-        for output in [originalOutput, naturalOutput, brightSmoothOutput, rosyOutput] {
+        for output in [originalOutput, zeroIntensityOutput, naturalOutput, brightSmoothOutput, rosyOutput, clearGlowOutput, backlightHdrOutput] {
             XCTAssertFalse(output.isEmpty)
             let img = try XCTUnwrap(UIImage(data: output))
             XCTAssertEqual(img.size.width, 240, accuracy: 1.0)
             XCTAssertEqual(img.size.height, 320, accuracy: 1.0)
         }
 
-        // Beautified presets should transform the mid-tone skin color compared to original
+        // Beautified presets should transform the mid-tone skin color compared to original, while 0% intensity matches original
         let originalSha = AttendanceContract.computeSha256Hex(originalOutput)
+        let zeroIntensitySha = AttendanceContract.computeSha256Hex(zeroIntensityOutput)
         let naturalSha = AttendanceContract.computeSha256Hex(naturalOutput)
         let brightSmoothSha = AttendanceContract.computeSha256Hex(brightSmoothOutput)
         let rosySha = AttendanceContract.computeSha256Hex(rosyOutput)
+        let clearGlowSha = AttendanceContract.computeSha256Hex(clearGlowOutput)
+        let backlightHdrSha = AttendanceContract.computeSha256Hex(backlightHdrOutput)
 
+        XCTAssertEqual(originalSha, zeroIntensitySha)
         XCTAssertNotEqual(originalSha, naturalSha)
         XCTAssertNotEqual(originalSha, brightSmoothSha)
         XCTAssertNotEqual(originalSha, rosySha)
+        XCTAssertNotEqual(originalSha, clearGlowSha)
+        XCTAssertNotEqual(originalSha, backlightHdrSha)
+
+        // Verify live camera CIImage pipeline with cached face bounding boxes
+        let inputCI = try XCTUnwrap(CIImage(data: rawJpeg))
+        let liveOutputCI = AttendanceBeautyFilter.applyToCIImage(
+            inputCI,
+            preset: .clearGlow,
+            intensity: 0.80,
+            detectFaceLandmarks: false,
+            cachedFaceBoundingBoxes: [CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)]
+        )
+        XCTAssertEqual(liveOutputCI.extent.width, inputCI.extent.width, accuracy: 1.0)
+        XCTAssertEqual(liveOutputCI.extent.height, inputCI.extent.height, accuracy: 1.0)
     }
 
     @MainActor
