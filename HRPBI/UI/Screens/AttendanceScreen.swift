@@ -4751,7 +4751,7 @@ public struct AttendanceLiveBeautyCameraSheet: View {
 
                 Button {
                     guard !isProcessingStill else { return }
-                    HapticsManager.mediumImpact()
+                    HapticsManager.lightImpact()
                     captureTriggerToken &+= 1
                 } label: {
                     ZStack {
