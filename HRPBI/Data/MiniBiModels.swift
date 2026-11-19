@@ -191,7 +191,7 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
     public let email: String
     public let phone: String
     public let teamName: String
-    public let permissions: [String]
+    public var permissions: [String]
     public var allowedWorkerTabs: [String]
     public var selfRecruiterSuggestion: String?
     public var scopes: [ActorScopeGrant]
@@ -308,9 +308,9 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         }
     }
 
-    /// Server contract for `GET /api/direct-entry/catalog`: `entry_create || entry_own`.
+    /// Server contract for `GET /api/direct-entry/catalog`: `entry_create || entry_own || entry_direct_edit`.
     public var canLoadDirectEntryCatalog: Bool {
-        hasCapability("entry_create") || hasCapability("entry_own")
+        hasCapability("entry_create") || hasCapability("entry_own") || hasCapability("entry_direct_edit")
     }
 
     /// Only show/allow entering the New Worker Entry ("Cấp mới") screen when `entry_create && submission_create`.
@@ -1551,7 +1551,7 @@ public struct WorkerItem: Identifiable, Equatable, Sendable {
     public let uploaderCode: String
     public let canView: Bool
     public let canProposeChange: Bool
-    public let canDirectEdit: Bool
+    public var canDirectEdit: Bool
     public let isProjectManager: Bool
     public let projectId: String
     public let recruiterId: String

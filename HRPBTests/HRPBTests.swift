@@ -5865,4 +5865,203 @@ final class HRPBTests: XCTestCase {
         XCTAssertEqual(parsedContractBulletin.pdfAttachments.count, 1)
         XCTAssertEqual(parsedContractBulletin.pdfAttachments.first?.pageCount, 2)
     }
+
+    @MainActor
+    func testDirectEditEmploymentStatusAuthorizedByServerRowAndSessionCapabilitiesAndWorkerDetailsNestedKey() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.pathDelaySec = [:]
+
+        let userId = "aaaa1680-1111-4222-8333-444444444444"
+        let entryId = "bbbb1680-2222-4333-8444-555555555555"
+
+        MockURLProtocol.requestHandler = { req in
+            let url = req.url!
+            let path = url.path
+            let method = req.httpMethod ?? "GET"
+            if path == "/api/direct-entry/session" && method == "GET" {
+                let body = """
+                {
+                  "ok": true,
+                  "actor": {
+                    "app_user_id": "\(userId)",
+                    "full_name": "Nguyễn Thị Bích Thủy",
+                    "allowed_worker_tabs": ["uploader", "all"],
+                    "capabilities": ["entry_read", "entry_direct_edit", "submission_create", "entry_create"]
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path.contains("/api/direct-entry/entries/\(entryId)") && method == "GET" {
+                let body = """
+                {
+                  "ok": true,
+                  "entry": {
+                    "entry_id": "\(entryId)",
+                    "version": 1,
+                    "employee_code": "hrp-2026-003729",
+                    "display_name": "Trần Thị Mai",
+                    "project_id": "jahwa_vina",
+                    "project_display": "Công Ty Tnhh Jahwa Vina",
+                    "recruiter_id": "22222222-3333-4444-8555-666666666666",
+                    "recruiter_display": "VD Thịnh Vượng - Vendor",
+                    "labor_type": "thoi_vu",
+                    "labor_type_display": "Thời vụ",
+                    "first_work_date": "2026-11-18",
+                    "worker": {
+                      "display_name": "Trần Thị Mai",
+                      "gender": { "state": "provided", "value": "FEMALE" },
+                      "national_id": { "state": "provided", "value": "008300003374" },
+                      "national_id_issued_place": { "state": "provided", "value": "Bộ Công An" },
+                      "phone": { "state": "provided", "value": "0984564502" }
+                    },
+                    "employment_status": {
+                      "status": "ON",
+                      "effective_date": "2026-11-18",
+                      "version": 1
+                    },
+                    "allowed_actions": {
+                      "view": true,
+                      "direct_edit": true
+                    }
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path.hasSuffix("/privileged-edit") && method == "POST" {
+                let body = """
+                {
+                  "ok": true,
+                  "entry": {
+                    "entry_id": "\(entryId)",
+                    "version": 2,
+                    "employee_code": "hrp-2026-003729",
+                    "display_name": "Trần Thị Mai",
+                    "project_id": "jahwa_vina",
+                    "project_display": "Công Ty Tnhh Jahwa Vina",
+                    "recruiter_id": "22222222-3333-4444-8555-666666666666",
+                    "recruiter_display": "VD Thịnh Vượng - Vendor",
+                    "labor_type": "thoi_vu",
+                    "labor_type_display": "Thời vụ",
+                    "first_work_date": "2026-11-18",
+                    "worker": {
+                      "display_name": "Trần Thị Mai",
+                      "gender": { "state": "provided", "value": "FEMALE" },
+                      "national_id": { "state": "provided", "value": "008300003374" },
+                      "national_id_issued_place": { "state": "provided", "value": "Bộ Công An" },
+                      "phone": { "state": "provided", "value": "0984564502" }
+                    },
+                    "employment_status": {
+                      "status": "OFF",
+                      "effective_date": "2026-11-19",
+                      "leave_reason": "Nghỉ việc cá nhân",
+                      "version": 2
+                    },
+                    "allowed_actions": {
+                      "view": true,
+                      "direct_edit": true
+                    }
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else {
+                let body = """
+                {"ok":true,"items":[]}
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            }
+        }
+
+        // 1. Verify parseWorkerItem parses personal fields nested under `"worker"` (including national_id_issued_place -> noiCapCccd)
+        let parsedWorker = MiniBiRepository.parseWorkerItem([
+            "entry_id": entryId,
+            "employee_code": "hrp-2026-003729",
+            "entry_version": 1,
+            "first_work_date": "2026-11-18",
+            "labor_type": "thoi_vu",
+            "project": ["project_id": "jahwa_vina", "display_name": "Công Ty Tnhh Jahwa Vina"],
+            "recruiter": ["recruiter_id": "22222222-3333-4444-8555-666666666666", "display_name": "VD Thịnh Vượng - Vendor"],
+            "worker": [
+                "display_name": "Trần Thị Mai",
+                "gender": ["state": "provided", "value": "FEMALE"],
+                "national_id": ["state": "provided", "value": "008300003374"],
+                "national_id_issued_place": ["state": "provided", "value": "Bộ Công An"],
+                "phone": ["state": "provided", "value": "0984564502"]
+            ],
+            "employment_status": [
+                "status": "ON",
+                "effective_date": "2026-11-18"
+            ],
+            "allowed_actions": [
+                "view": true,
+                "direct_edit": true
+            ]
+        ])
+        XCTAssertEqual(parsedWorker.hoTen, "Trần Thị Mai")
+        XCTAssertEqual(parsedWorker.gioiTinh, "Nữ")
+        XCTAssertEqual(parsedWorker.soCccd, "008300003374")
+        XCTAssertEqual(parsedWorker.noiCapCccd, "Bộ Công An")
+        XCTAssertEqual(parsedWorker.sdt, "0984564502")
+        XCTAssertTrue(parsedWorker.canDirectEdit)
+
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.repo168.\(UUID().uuidString)"))
+        let directEntry = DirectEntryService(httpClient: client)
+        let reporting = WorkReportsAndReportingService(httpClient: client)
+        let salaryAdvance = SalaryAdvanceService(httpClient: client)
+
+        // 2. Verify syncDirectEntrySession merges `actor.capabilities` into `user.permissions`
+        let initialUser = MiniBiUser(
+            id: userId,
+            username: "thuynb.td",
+            fullName: "Nguyễn Thị Bích Thủy",
+            permissions: ["entry_read"],
+            allowedWorkerTabs: []
+        )
+        let syncedUser = await repo.syncDirectEntrySession(for: initialUser)
+        XCTAssertTrue(syncedUser.hasCapability("entry_direct_edit"))
+        XCTAssertTrue(syncedUser.canLoadDirectEntryCatalog)
+
+        // 3. Even if `user.permissions` only had `["entry_read"]` (row-level direct_edit granted by server),
+        //    `openDirectEdit` and `submitDirectEditProfileAndDocuments` succeed when `worker.canDirectEdit == true`
+        let vm = MiniBiViewModel(
+            repository: repo,
+            directEntryService: directEntry,
+            workReportsService: reporting,
+            salaryAdvanceService: salaryAdvance
+        )
+        vm.currentUser = initialUser
+        vm.isAuthenticated = true
+        vm.directEntryOptions = DirectEntryAssigneeOptions(
+            catalogProjects: [DirectEntryCatalogProject(projectId: "jahwa_vina", displayName: "Công Ty Tnhh Jahwa Vina")]
+        )
+
+        await vm.openDirectEdit(parsedWorker)
+        XCTAssertNil(vm.bannerMessage, "Must not block openDirectEdit with permission error banner when worker.canDirectEdit is true")
+        XCTAssertNil(vm.directEditErrorMessage)
+        XCTAssertEqual(vm.directEditBaselineDetail?.entryId, entryId)
+        XCTAssertEqual(vm.directEditBaselineDetail?.soCccd, "008300003374")
+        XCTAssertEqual(vm.directEditBaselineDetail?.noiCapCccd, "Bộ Công An")
+        XCTAssertEqual(vm.directEditBaselineDetail?.sdt, "0984564502")
+
+        var editForm = DirectEntryService.buildDirectEditFormInput(from: try XCTUnwrap(vm.directEditBaselineDetail))
+        editForm.employmentStatusCode = "OFF"
+        editForm.employmentEffectiveDate = "19/11/2026"
+        editForm.leaveReason = "Nghỉ việc cá nhân"
+
+        var didComplete = false
+        await vm.submitDirectEditProfileAndDocuments(form: editForm, stagedFiles: [:]) {
+            didComplete = true
+        }
+        XCTAssertTrue(didComplete)
+        XCTAssertNil(vm.directEditErrorMessage)
+        let postReqs = MockURLProtocol.recordedRequests().filter { $0.url.contains("/privileged-edit") }
+        XCTAssertEqual(postReqs.count, 1)
+        XCTAssertTrue(postReqs[0].bodyString.contains("\"status\":\"OFF\""))
+        XCTAssertTrue(postReqs[0].bodyString.contains("\"leave_reason\":\"Nghỉ việc cá nhân\""))
+    }
 }

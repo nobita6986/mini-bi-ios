@@ -470,6 +470,20 @@ public final class MiniBiRepository {
                 } else if resolvedTabs.isEmpty {
                     copy.scopes = []
                 }
+                let directCapabilities = actorObj.optStringArray("capabilities") + actorObj.optStringArray("permissions")
+                if !directCapabilities.isEmpty {
+                    var seen = Set(copy.permissions.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
+                    var mergedPermissions = copy.permissions
+                    for cap in directCapabilities {
+                        let cleanCap = cap.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let lowerCap = cleanCap.lowercased()
+                        if !cleanCap.isEmpty && !seen.contains(lowerCap) {
+                            seen.insert(lowerCap)
+                            mergedPermissions.append(cleanCap)
+                        }
+                    }
+                    copy.permissions = mergedPermissions
+                }
                 if let suggestion = actorObj.optNullableString("self_recruiter_suggestion"), !suggestion.isEmpty {
                     copy.selfRecruiterSuggestion = suggestion
                 }
@@ -1042,7 +1056,8 @@ public final class MiniBiRepository {
             }
         }()
 
-        let workerDetailsObj = obj["worker_details"] as? [String: Any]
+        let workerDetailsObj = (obj["worker_details"] as? [String: Any])
+            ?? (obj["worker"] as? [String: Any])
         let paymentObj = (obj["payment"] as? [String: Any]) ?? (workerDetailsObj?["payment"] as? [String: Any])
         let piiObj = obj["pii"] as? [String: Any]
         let projectObj = obj["project"] as? [String: Any]
@@ -1051,7 +1066,7 @@ public final class MiniBiRepository {
 
         let rawEmployeeCode = obj.optString("employee_code", "ma_nld", "worker_code")
         let cleanEmployeeCode = WorkerItem.isUuidLike(rawEmployeeCode) ? "" : rawEmployeeCode
-        let entryId = obj.optString("entry_id", "id", "employee_code", "ma_nld", "worker_code")
+        let entryId = obj.optString("entry_id", "worker_entry_id", "id", "employee_code", "ma_nld", "worker_code")
         let entryVersion = obj.optInt("entry_version", "version", defaultValue: 1)
 
         let projectId = projectObj?.optString("project_id", "id") ?? obj.optString("project_id")
@@ -1108,6 +1123,8 @@ public final class MiniBiRepository {
             .ifEmpty(piiObj?.optString("permanent_address", "que_quan") ?? obj.optString("permanent_address", "que_quan", "dia_chi", "hometown"))
         let issueDate = Self.extractProvidedFieldValue(workerDetailsObj, "national_id_issued_at", "id_issue_date", "ngay_cap")
             .ifEmpty(piiObj?.optString("id_issue_date", "ngay_cap") ?? obj.optString("id_issue_date", "ngay_cap", "issue_date"))
+        let issuePlace = Self.extractProvidedFieldValue(workerDetailsObj, "national_id_issued_place", "noi_cap_cccd", "id_issue_place", "noi_cap")
+            .ifEmpty(piiObj?.optString("national_id_issued_place", "noi_cap_cccd", "id_issue_place") ?? obj.optString("national_id_issued_place", "noi_cap_cccd", "id_issue_place", "noi_cap"))
 
         let accountNumber = Self.extractProvidedFieldValue(paymentObj, "account_number", "so_tai_khoan")
             .ifEmpty(obj.optString("account_number", "so_tai_khoan", "stk", "bank_account"))
@@ -1135,7 +1152,8 @@ public final class MiniBiRepository {
         let allowedActionsObj = obj["allowed_actions"] as? [String: Any]
         let canView = allowedActionsObj?.optBool("view", defaultValue: true) ?? true
         let canProposeChange = allowedActionsObj?.optBool("propose_change", defaultValue: false) ?? false
-        let canDirectEdit = allowedActionsObj?.optBool("direct_edit", defaultValue: false) ?? false
+        let canDirectEdit = allowedActionsObj?.optBool("direct_edit", "privileged_edit", defaultValue: false)
+            ?? obj.optBool("can_direct_edit", defaultValue: false)
         let isProjectManager = obj.optBool("is_project_manager", defaultValue: false)
         let cleanStatusCode = ["ON", "OFF", "UNCONFIRMED"].contains(employmentStatusRaw) ? employmentStatusRaw : "ON"
 
@@ -1172,6 +1190,7 @@ public final class MiniBiRepository {
             gioiTinh: genderDisplay,
             queQuan: address,
             ngayCap: issueDate,
+            noiCapCccd: issuePlace,
             nganhNghe: laborTypeDisplay,
             nhom: teamDisplay,
             soTaiKhoan: accountNumber,

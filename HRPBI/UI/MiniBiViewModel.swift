@@ -2324,8 +2324,8 @@ public final class MiniBiViewModel: ObservableObject {
     // MARK: - Direct Edit ("Sửa trực tiếp hồ sơ NLĐ") Actions
 
     public func openDirectEdit(_ worker: WorkerItem) async {
-        guard let token = captureSessionToken(), let user = currentUser else { return }
-        guard user.hasCapability("entry_direct_edit") && worker.canDirectEdit else {
+        guard let token = captureSessionToken(), currentUser != nil else { return }
+        guard worker.canDirectEdit else {
             showBanner("Bạn không có quyền sửa trực tiếp hồ sơ này.", isError: true)
             return
         }
@@ -2362,11 +2362,13 @@ public final class MiniBiViewModel: ObservableObject {
 
         switch detailRes {
         case .success(let detail, _):
-            guard detail.entryId.isEmpty || detail.entryId.caseInsensitiveCompare(targetEntryId) == .orderedSame else {
+            guard detail.entryId.isEmpty
+                || detail.entryId.caseInsensitiveCompare(targetEntryId) == .orderedSame
+                || detail.employeeCode.caseInsensitiveCompare(targetEntryId) == .orderedSame else {
                 return
             }
             directEditBaselineDetail = detail
-            if !detail.canDirectEdit || currentUser?.hasCapability("entry_direct_edit") != true {
+            if !detail.canDirectEdit {
                 directEditErrorMessage = "Tài khoản hiện tại không có quyền sửa trực tiếp hồ sơ này."
             }
         case .failure(let message, _, _, _):
@@ -2414,7 +2416,7 @@ public final class MiniBiViewModel: ObservableObject {
 
         let patch = DirectEntryService.buildDirectEditPatch(baseline: baseline, input: form)
         let requestedStaged = stagedFiles.filter { !$0.value.isEmpty }
-        let canDirectEdit = user.hasCapability("entry_direct_edit") && baseline.canDirectEdit
+        let canDirectEdit = baseline.canDirectEdit
         let canUploadDocs = user.hasCapability("document_upload")
 
         if !patch.isEmpty && !canDirectEdit {
