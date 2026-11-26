@@ -1114,12 +1114,12 @@ public final class WorkReportsAndReportingService {
         switch result {
         case .success(let opts, let statusCode):
             return .success(opts.templates, statusCode: statusCode)
-        case .failure(let message, let httpStatus, let errorCode, let fieldErrors):
+        case .failure(let message, let httpStatus, let errorCode, let rawBody):
             return .failure(
                 message: message,
                 httpStatus: httpStatus,
                 errorCode: errorCode,
-                fieldErrors: fieldErrors
+                rawBody: rawBody
             )
         }
     }
