@@ -3980,7 +3980,7 @@ final class HRPBTests: XCTestCase {
             id: "11111111-1111-4111-8111-111111111111",
             username: "worker.default",
             fullName: "Nhân sự Mặc Định",
-            permissions: ["entry_read", "entry_create", "submission_create"],
+            permissions: ["entry_read", "entry_create", "submission_create", "entry_own"],
             allowedWorkerTabs: ["uploader", "recruited"]
         )
         vm.onAuthenticatedSessionEstablished(user: user)
@@ -6403,7 +6403,13 @@ final class HRPBTests: XCTestCase {
                   "ok": true,
                   "workforce": {
                     "snapshot": {"eligible_episode_total": 10, "on_count": 8, "off_count": 2, "unconfirmed_count": 0},
-                    "dimensions": {"by_team": {"buckets": []}}
+                    "dimensions": {
+                      "by_team": {
+                        "buckets": [
+                          {"key": "team:team_1", "display": "Team 1", "eligible_episode_count": 10, "on_count": 8, "off_count": 2, "unconfirmed_count": 0}
+                        ]
+                      }
+                    }
                   }
                 }
                 """
