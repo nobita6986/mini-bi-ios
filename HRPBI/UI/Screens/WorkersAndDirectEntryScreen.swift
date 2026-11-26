@@ -2493,7 +2493,9 @@ struct WorkerDirectEditSheet: View {
                             personalSection()
                             employmentSection()
                             paymentSection()
-                            documentsSection(detail: detail)
+                            if viewModel.currentUser?.hasCapability("document_upload") == true {
+                                documentsSection(detail: detail)
+                            }
                         }
                     }
                     .padding(14)

@@ -1043,65 +1043,268 @@ public final class WorkReportsAndReportingService {
         return .success(true, statusCode: response.statusCode)
     }
 
-    public func fetchSelectableTemplates() async -> MiniBiApiResult<[WorkReportTemplateOption]> {
-        var response = await httpClient.request(method: "GET", path: "/api/work-reports/templates/selectable")
-        if response.statusCode == 404 {
-            response = await httpClient.request(method: "GET", path: "/api/work-reports/templates")
+    public static func parseAnalyticsOptions(_ root: [String: Any]) -> WorkReportAnalyticsOptions {
+        let dataObj = (root["data"] as? [String: Any]) ?? root
+        let effectiveScope = dataObj.optString("effective_scope", "scope")
+
+        let rawTemplates = dataObj.optObjectArray("templates")
+            .ifEmpty(root.optObjectArray("templates"))
+            .ifEmpty(root.optObjectArray("items"))
+        let templates: [WorkReportTemplateOption] = rawTemplates.compactMap { obj in
+            let templateId = obj.optString("template_id", "id", "code", "template_code")
+            let code = obj.optString("code", "template_code", defaultValue: templateId)
+            let resolvedTemplateId = templateId.isEmpty ? code : templateId
+            let resolvedCode = code.isEmpty ? resolvedTemplateId : code
+            guard !resolvedTemplateId.isEmpty else { return nil }
+            let name = obj.optString("name", "template_name", "title", defaultValue: resolvedCode)
+            let periodType = obj.optString("period_type", "cadence", defaultValue: "WEEKLY")
+            return WorkReportTemplateOption(
+                templateId: resolvedTemplateId,
+                code: resolvedCode,
+                name: name,
+                periodType: periodType
+            )
         }
+
+        let rawTeams = dataObj.optObjectArray("teams").ifEmpty(root.optObjectArray("teams"))
+        let teams: [WorkReportAnalyticsFilterOption] = rawTeams.compactMap { obj in
+            let id = obj.optString("team_id", "id", "unit_id", "org_unit_id", "code")
+            guard !id.isEmpty else { return nil }
+            let label = obj.optString("label", "name", "team_name", "display_name", "unit_name", defaultValue: id)
+            return WorkReportAnalyticsFilterOption(id: id, label: label)
+        }
+
+        let rawAssignees = dataObj.optObjectArray("assignees").ifEmpty(root.optObjectArray("assignees"))
+        let assignees: [WorkReportAnalyticsFilterOption] = rawAssignees.compactMap { obj in
+            let id = obj.optString("assignee_id", "user_id", "app_user_id", "id")
+            guard !id.isEmpty else { return nil }
+            let label = obj.optString("label", "display_name", "full_name", "name", defaultValue: id)
+            return WorkReportAnalyticsFilterOption(id: id, label: label)
+        }
+
+        return WorkReportAnalyticsOptions(
+            effectiveScope: effectiveScope,
+            templates: templates,
+            teams: teams,
+            assignees: assignees
+        )
+    }
+
+    public func fetchAnalyticsOptions() async -> MiniBiApiResult<WorkReportAnalyticsOptions> {
+        let response = await httpClient.request(
+            method: "GET",
+            path: "/api/work-reports/analytics/options"
+        )
         if response.statusCode == 403 || response.statusCode == 404 {
-            return .success([], statusCode: response.statusCode)
+            return .success(WorkReportAnalyticsOptions(), statusCode: response.statusCode)
         }
         guard response.isSuccess else {
             return .failure(
-                message: response.errorMessage ?? "Không tải được danh sách biểu mẫu báo cáo.",
+                message: response.errorMessage ?? "Không tải được danh sách biểu mẫu thống kê báo cáo.",
                 httpStatus: response.statusCode,
                 errorCode: response.errorCode
             )
         }
-        let root = response.jsonObject ?? [:]
-        let rawList = root.optObjectArray("items")
-            .ifEmpty(root.optObjectArray("data"))
-            .ifEmpty(root.optObjectArray("templates"))
-            .ifEmpty((root["data"] as? [String: Any])?.optObjectArray("templates") ?? [])
+        let options = Self.parseAnalyticsOptions(response.jsonObject ?? [:])
+        return .success(options, statusCode: response.statusCode)
+    }
 
-        let items = rawList.compactMap { obj -> WorkReportTemplateOption? in
-            let code = obj.optString("code", "template_code", "template_id", "id")
-            guard !code.isEmpty else { return nil }
-            let name = obj.optString("name", "template_name", "title", defaultValue: code)
-            let periodType = obj.optString("period_type", defaultValue: "WEEKLY")
-            return WorkReportTemplateOption(code: code, name: name, periodType: periodType)
+    public func fetchSelectableTemplates() async -> MiniBiApiResult<[WorkReportTemplateOption]> {
+        let result = await fetchAnalyticsOptions()
+        switch result {
+        case .success(let opts, let statusCode):
+            return .success(opts.templates, statusCode: statusCode)
+        case .failure(let message, let httpStatus, let errorCode, let fieldErrors):
+            return .failure(
+                message: message,
+                httpStatus: httpStatus,
+                errorCode: errorCode,
+                fieldErrors: fieldErrors
+            )
         }
-        return .success(items, statusCode: response.statusCode)
+    }
+
+    public static func parseAnalyticsOverview(
+        _ root: [String: Any],
+        selectedTemplateId: String = "",
+        breakdownRows: [WorkReportAnalyticsGroupRow] = []
+    ) -> WorkReportsAnalyticsSnapshot {
+        let dataObj = (root["data"] as? [String: Any]) ?? root
+        let compObj = (dataObj["compliance"] as? [String: Any])
+            ?? (dataObj["summary"] as? [String: Any])
+            ?? (dataObj["kpis"] as? [String: Any])
+            ?? dataObj
+
+        let dueCount = compObj.optInt("due_count", "expected_count", "total_obligations", "total")
+        let completedCount = compObj.optInt("completed_count", "submitted_count", "submitted")
+        let onTimeCount = compObj.optInt("on_time_count", "ontime_count")
+        let lateSubmittedCount = compObj.optInt("late_submitted_count", "late_count")
+        let pendingDueCount = compObj.optInt("pending_due_count", "pending_count")
+        let overdueMissingCount = compObj.optInt("overdue_missing_count", "overdue_count", "overdue")
+        let exemptedCount = compObj.optInt("exempted_count")
+        let pendingReviewCount = compObj.optInt("pending_review_count")
+        let approvedCount = compObj.optInt("approved_count", "approved")
+        let rejectedCount = compObj.optInt("rejected_count", "rejected")
+        let completionRate = compObj.optNullableDouble("completion_rate", "submitted_rate")
+            ?? (dueCount > 0 ? (Double(completedCount) * 100.0 / Double(dueCount)) : 0.0)
+        let onTimeRate = compObj.optNullableDouble("on_time_rate", "ontime_rate", "approval_rate")
+            ?? (dueCount > 0 ? (Double(onTimeCount) * 100.0 / Double(dueCount)) : 0.0)
+
+        let rawMetrics = dataObj.optObjectArray("metrics").ifEmpty(root.optObjectArray("metrics"))
+        let metrics: [WorkReportAnalyticsMetricRow] = rawMetrics.compactMap { m in
+            let metricKey = m.optString("metric_key", "key", "field_key", "id")
+            let label = m.optString("label", "name", "title", defaultValue: metricKey)
+            let resolvedKey = metricKey.isEmpty ? label : metricKey
+            guard !resolvedKey.isEmpty else { return nil }
+            let unit = m.optString("unit")
+            let sumValue = m.optNullableDouble("sum_value", "sum")
+            let avgValue = m.optNullableDouble("avg_value", "avg")
+            let countValid = m.optInt("count_valid", "valid_count", "count")
+            return WorkReportAnalyticsMetricRow(
+                metricKey: resolvedKey,
+                label: label,
+                unit: unit,
+                sumValue: sumValue,
+                avgValue: avgValue,
+                countValid: countValid
+            )
+        }
+
+        let byUnit: [WorkReportAnalyticsGroupRow]
+        if !breakdownRows.isEmpty {
+            byUnit = breakdownRows
+        } else {
+            let byUnitRaw = dataObj.optObjectArray("by_unit").ifEmpty(dataObj.optObjectArray("units"))
+            byUnit = byUnitRaw.enumerated().map { idx, u in
+                let rowDue = u.optInt("due_count", "expected_count", "total_obligations", "total")
+                let rowCompleted = u.optInt("completed_count", "submitted_count", "submitted")
+                let rowRate = u.optNullableDouble("completion_rate", "submitted_rate")
+                    ?? (rowDue > 0 ? (Double(rowCompleted) * 100.0 / Double(rowDue)) : 0.0)
+                return WorkReportAnalyticsGroupRow(
+                    id: u.optString("org_unit_id", "team_id", "unit_code", "id", defaultValue: "unit_\(idx)"),
+                    groupLabel: u.optString("unit_name", "team_name", "label", "name", defaultValue: "Đơn vị \(idx + 1)"),
+                    totalObligations: rowDue,
+                    submittedCount: rowCompleted,
+                    approvedCount: u.optInt("approved_count", "approved"),
+                    overdueCount: u.optInt("overdue_missing_count", "overdue_count", "overdue"),
+                    completionRate: rowRate
+                )
+            }
+        }
+
+        let byTemplateRaw = dataObj.optObjectArray("by_template").ifEmpty(dataObj.optObjectArray("templates"))
+        let byTemplate: [WorkReportAnalyticsGroupRow] = byTemplateRaw.enumerated().map { idx, t in
+            let rowDue = t.optInt("due_count", "expected_count", "total_obligations", "total")
+            let rowCompleted = t.optInt("completed_count", "submitted_count", "submitted")
+            let rowRate = t.optNullableDouble("completion_rate", "submitted_rate")
+                ?? (rowDue > 0 ? (Double(rowCompleted) * 100.0 / Double(rowDue)) : 0.0)
+            return WorkReportAnalyticsGroupRow(
+                id: t.optString("template_id", "template_code", "id", defaultValue: "tpl_\(idx)"),
+                groupLabel: t.optString("template_name", "label", "name", defaultValue: "Mẫu \(idx + 1)"),
+                totalObligations: rowDue,
+                submittedCount: rowCompleted,
+                approvedCount: t.optInt("approved_count", "approved"),
+                overdueCount: t.optInt("overdue_missing_count", "overdue_count", "overdue"),
+                completionRate: rowRate
+            )
+        }
+
+        return WorkReportsAnalyticsSnapshot(
+            kpis: WorkReportAnalyticsKpis(
+                totalObligations: dueCount,
+                submittedCount: completedCount,
+                approvedCount: approvedCount,
+                rejectedCount: rejectedCount,
+                overdueCount: overdueMissingCount,
+                completionRate: completionRate,
+                onTimeRate: onTimeRate,
+                onTimeCount: onTimeCount,
+                lateSubmittedCount: lateSubmittedCount,
+                pendingDueCount: pendingDueCount,
+                exemptedCount: exemptedCount,
+                pendingReviewCount: pendingReviewCount
+            ),
+            byUnit: byUnit,
+            byTemplate: byTemplate,
+            metrics: metrics,
+            selectedTemplateId: selectedTemplateId
+        )
+    }
+
+    public static func parseAnalyticsBreakdown(_ root: [String: Any]) -> [WorkReportAnalyticsGroupRow] {
+        let dataObj = (root["data"] as? [String: Any]) ?? root
+        let rawRows = dataObj.optObjectArray("items")
+            .ifEmpty(dataObj.optObjectArray("rows"))
+            .ifEmpty(dataObj.optObjectArray("buckets"))
+            .ifEmpty(dataObj.optObjectArray("breakdown"))
+            .ifEmpty(root.optObjectArray("items"))
+            .ifEmpty(root.optObjectArray("rows"))
+
+        return rawRows.enumerated().map { idx, row in
+            let comp = (row["compliance"] as? [String: Any]) ?? row
+            let id = row.optString(
+                "group_id", "team_id", "org_unit_id", "unit_code", "assignee_id", "key", "id",
+                defaultValue: "group_\(idx)"
+            )
+            let label = row.optString(
+                "group_label", "label", "team_name", "unit_name", "display_name", "name",
+                defaultValue: id.isEmpty ? "Nhóm \(idx + 1)" : id
+            )
+            let dueCount = comp.optInt("due_count", "expected_count", "total_obligations", "total")
+            let completedCount = comp.optInt("completed_count", "submitted_count", "submitted")
+            let approvedCount = comp.optInt("approved_count", "approved")
+            let overdueCount = comp.optInt("overdue_missing_count", "overdue_count", "overdue")
+            let completionRate = comp.optNullableDouble("completion_rate", "submitted_rate")
+                ?? (dueCount > 0 ? (Double(completedCount) * 100.0 / Double(dueCount)) : 0.0)
+            return WorkReportAnalyticsGroupRow(
+                id: id,
+                groupLabel: label,
+                totalObligations: dueCount,
+                submittedCount: completedCount,
+                approvedCount: approvedCount,
+                overdueCount: overdueCount,
+                completionRate: completionRate
+            )
+        }
     }
 
     public func fetchAnalyticsSnapshot(
-        templateCode: String? = nil,
-        periodType: String? = nil,
-        periodKey: String? = nil
+        templateId: String,
+        fromDate: String? = nil,
+        toDate: String? = nil,
+        teamId: String? = nil,
+        assigneeId: String? = nil,
+        finality: String? = nil,
+        breakdownGroupBy: String? = "team"
     ) async -> MiniBiApiResult<WorkReportsAnalyticsSnapshot> {
-        var queryItems: [URLQueryItem] = []
-        if let templateCode, !templateCode.isEmpty {
-            queryItems.append(URLQueryItem(name: "template_code", value: templateCode))
-        }
-        if let periodType, !periodType.isEmpty {
-            queryItems.append(URLQueryItem(name: "period_type", value: periodType))
-        }
-        if let periodKey, !periodKey.isEmpty {
-            queryItems.append(URLQueryItem(name: "period_key", value: periodKey))
+        let cleanTemplateId = templateId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTemplateId.isEmpty else {
+            return .success(WorkReportsAnalyticsSnapshot(), statusCode: 200)
         }
 
-        var response = await httpClient.request(
+        var optionalFilterItems: [URLQueryItem] = []
+        if let from = fromDate?.trimmingCharacters(in: .whitespacesAndNewlines), !from.isEmpty {
+            optionalFilterItems.append(URLQueryItem(name: "from", value: from))
+        }
+        if let to = toDate?.trimmingCharacters(in: .whitespacesAndNewlines), !to.isEmpty {
+            optionalFilterItems.append(URLQueryItem(name: "to", value: to))
+        }
+        if let team = teamId?.trimmingCharacters(in: .whitespacesAndNewlines), !team.isEmpty {
+            optionalFilterItems.append(URLQueryItem(name: "team_id", value: team))
+        }
+        if let assignee = assigneeId?.trimmingCharacters(in: .whitespacesAndNewlines), !assignee.isEmpty {
+            optionalFilterItems.append(URLQueryItem(name: "assignee_id", value: assignee))
+        }
+        if let finality = finality?.trimmingCharacters(in: .whitespacesAndNewlines), !finality.isEmpty {
+            optionalFilterItems.append(URLQueryItem(name: "finality", value: finality))
+        }
+
+        let overviewQueryItems = [URLQueryItem(name: "template_id", value: cleanTemplateId)] + optionalFilterItems
+        let response = await httpClient.request(
             method: "GET",
             path: "/api/work-reports/analytics/overview",
-            queryItems: queryItems
+            queryItems: overviewQueryItems
         )
-        if response.statusCode == 404 {
-            response = await httpClient.request(
-                method: "GET",
-                path: "/api/work-reports/analytics/summary",
-                queryItems: queryItems
-            )
-        }
         if response.statusCode == 403 || response.statusCode == 404 {
             return .success(WorkReportsAnalyticsSnapshot(), statusCode: response.statusCode)
         }
@@ -1113,56 +1316,26 @@ public final class WorkReportsAndReportingService {
             )
         }
 
-        let root = response.jsonObject ?? [:]
-        let dataObj = (root["data"] as? [String: Any]) ?? root
-        let kpiObj = (dataObj["summary"] as? [String: Any]) ?? (dataObj["kpis"] as? [String: Any]) ?? dataObj
-
-        let totalOb = kpiObj.optInt("expected_count", "total_obligations", "total")
-        let submittedCount = kpiObj.optInt("submitted_count", "submitted")
-        let approvedCount = kpiObj.optInt("approved_count", "approved")
-        let rejectedCount = kpiObj.optInt("rejected_count", "rejected")
-        let overdueCount = kpiObj.optInt("overdue_count", "overdue")
-        let completionRate = kpiObj.optDouble("completion_rate", "submitted_rate")
-        let onTimeRate = kpiObj.optDouble("approval_rate", "on_time_rate", "ontime_rate")
-
-        let byUnitRaw = dataObj.optObjectArray("by_unit").ifEmpty(dataObj.optObjectArray("units"))
-        let byUnit: [WorkReportAnalyticsGroupRow] = byUnitRaw.enumerated().map { idx, u in
-            WorkReportAnalyticsGroupRow(
-                id: u.optString("org_unit_id", "unit_code", "id", defaultValue: "unit_\(idx)"),
-                groupLabel: u.optString("unit_name", "label", "name", defaultValue: "Đơn vị \(idx + 1)"),
-                totalObligations: u.optInt("expected_count", "total_obligations", "total"),
-                submittedCount: u.optInt("submitted_count", "submitted"),
-                approvedCount: u.optInt("approved_count", "approved"),
-                overdueCount: u.optInt("overdue_count", "overdue"),
-                completionRate: u.optDouble("completion_rate")
+        var breakdownRows: [WorkReportAnalyticsGroupRow] = []
+        if let groupBy = breakdownGroupBy?.trimmingCharacters(in: .whitespacesAndNewlines), !groupBy.isEmpty {
+            let breakdownQueryItems = [
+                URLQueryItem(name: "template_id", value: cleanTemplateId),
+                URLQueryItem(name: "group_by", value: groupBy)
+            ] + optionalFilterItems
+            let breakdownResponse = await httpClient.request(
+                method: "GET",
+                path: "/api/work-reports/analytics/breakdown",
+                queryItems: breakdownQueryItems
             )
+            if breakdownResponse.isSuccess, let breakdownRoot = breakdownResponse.jsonObject {
+                breakdownRows = Self.parseAnalyticsBreakdown(breakdownRoot)
+            }
         }
 
-        let byTemplateRaw = dataObj.optObjectArray("by_template").ifEmpty(dataObj.optObjectArray("templates"))
-        let byTemplate: [WorkReportAnalyticsGroupRow] = byTemplateRaw.enumerated().map { idx, t in
-            WorkReportAnalyticsGroupRow(
-                id: t.optString("template_code", "id", defaultValue: "tpl_\(idx)"),
-                groupLabel: t.optString("template_name", "label", "name", defaultValue: "Mẫu \(idx + 1)"),
-                totalObligations: t.optInt("expected_count", "total_obligations", "total"),
-                submittedCount: t.optInt("submitted_count", "submitted"),
-                approvedCount: t.optInt("approved_count", "approved"),
-                overdueCount: t.optInt("overdue_count", "overdue"),
-                completionRate: t.optDouble("completion_rate")
-            )
-        }
-
-        let snapshot = WorkReportsAnalyticsSnapshot(
-            kpis: WorkReportAnalyticsKpis(
-                totalObligations: totalOb,
-                submittedCount: submittedCount,
-                approvedCount: approvedCount,
-                rejectedCount: rejectedCount,
-                overdueCount: overdueCount,
-                completionRate: completionRate,
-                onTimeRate: onTimeRate
-            ),
-            byUnit: byUnit,
-            byTemplate: byTemplate
+        let snapshot = Self.parseAnalyticsOverview(
+            response.jsonObject ?? [:],
+            selectedTemplateId: cleanTemplateId,
+            breakdownRows: breakdownRows
         )
         return .success(snapshot, statusCode: response.statusCode)
     }

@@ -195,6 +195,7 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
     public var allowedWorkerTabs: [String]
     public var selfRecruiterSuggestion: String?
     public var scopes: [ActorScopeGrant]
+    public var effectiveReportReviewScopes: [String]
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -209,6 +210,7 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         case allowedWorkerTabs
         case selfRecruiterSuggestion
         case scopes
+        case effectiveReportReviewScopes
     }
 
     public init(from decoder: Decoder) throws {
@@ -226,6 +228,7 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         self.allowedWorkerTabs = Self.sanitizeAllowedWorkerTabs(rawTabs)
         self.selfRecruiterSuggestion = try container.decodeIfPresent(String.self, forKey: .selfRecruiterSuggestion)
         self.scopes = try container.decodeIfPresent([ActorScopeGrant].self, forKey: .scopes) ?? []
+        self.effectiveReportReviewScopes = try container.decodeIfPresent([String].self, forKey: .effectiveReportReviewScopes) ?? []
     }
 
     public static func looksLikeLoginHandle(_ text: String, username: String = "") -> Bool {
@@ -318,6 +321,22 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         hasCapability("entry_create") && hasCapability("submission_create")
     }
 
+    public var canViewWorkReportReviewQueue: Bool {
+        hasCapability("report_review") || !effectiveReportReviewScopes.isEmpty
+    }
+
+    public var canViewWorkReportAnalytics: Bool {
+        hasCapability("report_analytics_view")
+    }
+
+    public var canAccessDashboard: Bool {
+        hasCapability("entry_own")
+            || hasCapability("entry_team")
+            || hasCapability("entry_admin")
+            || hasCapability("report_view")
+            || hasCapability("report_analytics_view")
+    }
+
     /// Server PM salary-advance predicate requires an active project manager assignment
     /// (`managed_projects` with `is_active_assignment=true`), which is necessary for `"managed"`
     /// to be present in `allowed_worker_tabs`. Note: `"managed"` is a necessary condition
@@ -353,7 +372,8 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         allowedWorkerTabs: [String]? = nil,
         allowedWorkerScopes: [String] = [],
         selfRecruiterSuggestion: String? = nil,
-        scopes: [ActorScopeGrant] = []
+        scopes: [ActorScopeGrant] = [],
+        effectiveReportReviewScopes: [String] = []
     ) {
         self.id = id
         self.username = username
@@ -368,6 +388,7 @@ public struct MiniBiUser: Codable, Equatable, Identifiable, Sendable {
         let cleanSuggestion = selfRecruiterSuggestion?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.selfRecruiterSuggestion = cleanSuggestion.isEmpty ? nil : cleanSuggestion
         self.scopes = scopes
+        self.effectiveReportReviewScopes = effectiveReportReviewScopes
     }
 }
 
@@ -392,10 +413,14 @@ public enum MiniBiNavDestination: String, CaseIterable, Identifiable, Equatable,
     public static func resolveMainNavigationDestinations(for user: MiniBiUser?) -> [MiniBiNavDestination] {
         guard let user else { return [] }
         return mainMenuDestinations.filter { dest in
-            if dest == .workers {
+            switch dest {
+            case .dashboard:
+                return user.canAccessDashboard
+            case .workers:
                 return !user.safeAllowedWorkerDirectoryScopes.isEmpty || user.canAccessNewWorkerEntry
+            default:
+                return true
             }
-            return true
         }
     }
 
@@ -530,6 +555,17 @@ public enum WorkReportsSubTab: String, CaseIterable, Identifiable, Equatable, Se
     case analytics = "analytics"
 
     public var id: String { rawValue }
+
+    public static func visibleTabs(for user: MiniBiUser?) -> [WorkReportsSubTab] {
+        var tabs: [WorkReportsSubTab] = [.actionable, .history]
+        if user?.canViewWorkReportReviewQueue == true {
+            tabs.append(.reviewQueue)
+        }
+        if user?.canViewWorkReportAnalytics == true {
+            tabs.append(.analytics)
+        }
+        return tabs
+    }
 
     public var titleVi: String {
         switch self {
@@ -2529,15 +2565,72 @@ public struct WorkReportReviewItem: Identifiable, Equatable, Sendable {
 }
 
 public struct WorkReportTemplateOption: Identifiable, Equatable, Sendable {
-    public var id: String { code }
+    public var id: String { templateId.isEmpty ? code : templateId }
+    public let templateId: String
     public let code: String
     public let name: String
     public let periodType: String
 
-    public init(code: String, name: String, periodType: String = "WEEKLY") {
+    public init(templateId: String = "", code: String, name: String, periodType: String = "WEEKLY") {
+        self.templateId = templateId
         self.code = code
         self.name = name
         self.periodType = periodType
+    }
+}
+
+public struct WorkReportAnalyticsFilterOption: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let label: String
+
+    public init(id: String, label: String) {
+        self.id = id
+        self.label = label
+    }
+}
+
+public struct WorkReportAnalyticsOptions: Equatable, Sendable {
+    public let effectiveScope: String
+    public let templates: [WorkReportTemplateOption]
+    public let teams: [WorkReportAnalyticsFilterOption]
+    public let assignees: [WorkReportAnalyticsFilterOption]
+
+    public init(
+        effectiveScope: String = "",
+        templates: [WorkReportTemplateOption] = [],
+        teams: [WorkReportAnalyticsFilterOption] = [],
+        assignees: [WorkReportAnalyticsFilterOption] = []
+    ) {
+        self.effectiveScope = effectiveScope
+        self.templates = templates
+        self.teams = teams
+        self.assignees = assignees
+    }
+}
+
+public struct WorkReportAnalyticsMetricRow: Identifiable, Equatable, Sendable {
+    public var id: String { metricKey }
+    public let metricKey: String
+    public let label: String
+    public let unit: String
+    public let sumValue: Double?
+    public let avgValue: Double?
+    public let countValid: Int
+
+    public init(
+        metricKey: String,
+        label: String,
+        unit: String = "",
+        sumValue: Double? = nil,
+        avgValue: Double? = nil,
+        countValid: Int = 0
+    ) {
+        self.metricKey = metricKey
+        self.label = label
+        self.unit = unit
+        self.sumValue = sumValue
+        self.avgValue = avgValue
+        self.countValid = countValid
     }
 }
 
@@ -2549,6 +2642,11 @@ public struct WorkReportAnalyticsKpis: Equatable, Sendable {
     public let overdueCount: Int
     public let completionRate: Double
     public let onTimeRate: Double
+    public let onTimeCount: Int
+    public let lateSubmittedCount: Int
+    public let pendingDueCount: Int
+    public let exemptedCount: Int
+    public let pendingReviewCount: Int
 
     public init(
         totalObligations: Int = 0,
@@ -2557,7 +2655,12 @@ public struct WorkReportAnalyticsKpis: Equatable, Sendable {
         rejectedCount: Int = 0,
         overdueCount: Int = 0,
         completionRate: Double = 0.0,
-        onTimeRate: Double = 0.0
+        onTimeRate: Double = 0.0,
+        onTimeCount: Int = 0,
+        lateSubmittedCount: Int = 0,
+        pendingDueCount: Int = 0,
+        exemptedCount: Int = 0,
+        pendingReviewCount: Int = 0
     ) {
         self.totalObligations = totalObligations
         self.submittedCount = submittedCount
@@ -2566,6 +2669,11 @@ public struct WorkReportAnalyticsKpis: Equatable, Sendable {
         self.overdueCount = overdueCount
         self.completionRate = completionRate
         self.onTimeRate = onTimeRate
+        self.onTimeCount = onTimeCount
+        self.lateSubmittedCount = lateSubmittedCount
+        self.pendingDueCount = pendingDueCount
+        self.exemptedCount = exemptedCount
+        self.pendingReviewCount = pendingReviewCount
     }
 }
 
@@ -2601,15 +2709,21 @@ public struct WorkReportsAnalyticsSnapshot: Equatable, Sendable {
     public let kpis: WorkReportAnalyticsKpis
     public let byUnit: [WorkReportAnalyticsGroupRow]
     public let byTemplate: [WorkReportAnalyticsGroupRow]
+    public let metrics: [WorkReportAnalyticsMetricRow]
+    public let selectedTemplateId: String
 
     public init(
         kpis: WorkReportAnalyticsKpis = WorkReportAnalyticsKpis(),
         byUnit: [WorkReportAnalyticsGroupRow] = [],
-        byTemplate: [WorkReportAnalyticsGroupRow] = []
+        byTemplate: [WorkReportAnalyticsGroupRow] = [],
+        metrics: [WorkReportAnalyticsMetricRow] = [],
+        selectedTemplateId: String = ""
     ) {
         self.kpis = kpis
         self.byUnit = byUnit
         self.byTemplate = byTemplate
+        self.metrics = metrics
+        self.selectedTemplateId = selectedTemplateId
     }
 }
 

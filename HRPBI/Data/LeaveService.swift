@@ -122,6 +122,7 @@ public struct LeaveRoutingProjection: Equatable, Sendable {
     public let teamName: String?
     public let fallbackReason: String?
     public let profileConfigured: Bool
+    public let orgDepartmentName: String?
 
     public init(
         routeKind: String = "ADMIN_BOD_FALLBACK",
@@ -131,7 +132,8 @@ public struct LeaveRoutingProjection: Equatable, Sendable {
         teamCode: String? = nil,
         teamName: String? = nil,
         fallbackReason: String? = nil,
-        profileConfigured: Bool = false
+        profileConfigured: Bool = false,
+        orgDepartmentName: String? = nil
     ) {
         self.routeKind = routeKind
         self.unitKind = unitKind
@@ -141,6 +143,7 @@ public struct LeaveRoutingProjection: Equatable, Sendable {
         self.teamName = teamName
         self.fallbackReason = fallbackReason
         self.profileConfigured = profileConfigured
+        self.orgDepartmentName = orgDepartmentName
     }
 }
 
@@ -247,6 +250,7 @@ public struct LeaveBalanceProjection: Equatable, Sendable {
     public let pendingUnpaidUnits: Int
     public let approvedUnpaidUnits: Int
     public let lots: [LeaveLotProjection]
+    public let orgDepartmentName: String?
 
     public init(
         leaveYear: Int,
@@ -275,7 +279,8 @@ public struct LeaveBalanceProjection: Equatable, Sendable {
         pendingPaidUnits: Int = 0,
         pendingUnpaidUnits: Int = 0,
         approvedUnpaidUnits: Int = 0,
-        lots: [LeaveLotProjection] = []
+        lots: [LeaveLotProjection] = [],
+        orgDepartmentName: String? = nil
     ) {
         self.leaveYear = leaveYear
         self.asOfDate = asOfDate
@@ -304,6 +309,7 @@ public struct LeaveBalanceProjection: Equatable, Sendable {
         self.pendingUnpaidUnits = pendingUnpaidUnits
         self.approvedUnpaidUnits = approvedUnpaidUnits
         self.lots = lots
+        self.orgDepartmentName = orgDepartmentName
     }
 }
 
@@ -534,6 +540,7 @@ public struct LeaveMeSummaryProjection: Equatable, Sendable {
     public let balance: LeaveBalanceProjection
     public let requests: [LeaveRequestProjection]
     public let ledgerEntries: [LeaveLedgerEntryProjection]
+    public let orgDepartmentName: String?
 
     public init(
         asOfDate: String,
@@ -544,7 +551,8 @@ public struct LeaveMeSummaryProjection: Equatable, Sendable {
         policy: LeavePolicyProjection = LeavePolicyProjection(),
         balance: LeaveBalanceProjection,
         requests: [LeaveRequestProjection] = [],
-        ledgerEntries: [LeaveLedgerEntryProjection] = []
+        ledgerEntries: [LeaveLedgerEntryProjection] = [],
+        orgDepartmentName: String? = nil
     ) {
         self.asOfDate = asOfDate
         self.leaveYear = leaveYear
@@ -555,6 +563,7 @@ public struct LeaveMeSummaryProjection: Equatable, Sendable {
         self.balance = balance
         self.requests = requests
         self.ledgerEntries = ledgerEntries
+        self.orgDepartmentName = orgDepartmentName
     }
 }
 
@@ -1191,10 +1200,21 @@ public enum LeaveContract {
         )
     }
 
+    public static func leaveUnitDisplayLabel(unitKind: String, orgDepartmentName: String? = nil) -> String {
+        let cleanKind = unitKind.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if cleanKind.isEmpty || cleanKind == "UNCLASSIFIED" {
+            if let dept = orgDepartmentName?.trimmingCharacters(in: .whitespacesAndNewlines), !dept.isEmpty {
+                return dept
+            }
+        }
+        return leaveUnitKindLabel(unitKind)
+    }
+
     public static func leaveRouteKindLabel(
         _ routeKind: String,
         teamName: String? = nil,
-        unitKind: String? = nil
+        unitKind: String? = nil,
+        orgDepartmentName: String? = nil
     ) -> String {
         switch routeKind.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
         case "TEAM_LEADER":
@@ -1204,7 +1224,10 @@ public enum LeaveContract {
             return "Team Leader"
         case "DEPARTMENT_HEAD":
             if let unitKind = unitKind?.trimmingCharacters(in: .whitespacesAndNewlines), !unitKind.isEmpty {
-                return "Trưởng bộ phận (\(leaveUnitKindLabel(unitKind)))"
+                return "Trưởng bộ phận (\(leaveUnitDisplayLabel(unitKind: unitKind, orgDepartmentName: orgDepartmentName)))"
+            }
+            if let dept = orgDepartmentName?.trimmingCharacters(in: .whitespacesAndNewlines), !dept.isEmpty {
+                return "Trưởng bộ phận (\(dept))"
             }
             return "Trưởng bộ phận"
         case "ADMIN_BOD_DIRECT":
@@ -1586,8 +1609,14 @@ public enum LeaveContract {
         )
     }
 
-    public static func parseRoutingProjection(_ obj: [String: Any]?) -> LeaveRoutingProjection {
+    public static func parseRoutingProjection(
+        _ obj: [String: Any]?,
+        fallbackOrgDepartmentName: String? = nil
+    ) -> LeaveRoutingProjection {
         let safe = obj ?? [:]
+        let orgDeptName = (safe["org_department"] as? [String: Any])?.optNullableString("department_name", "name")
+            ?? safe.optNullableString("department_name")
+            ?? fallbackOrgDepartmentName
         return LeaveRoutingProjection(
             routeKind: safe.optString("route_kind", defaultValue: "ADMIN_BOD_FALLBACK"),
             unitKind: safe.optString("unit_kind", defaultValue: "UNCLASSIFIED"),
@@ -1596,7 +1625,8 @@ public enum LeaveContract {
             teamCode: safe.optNullableString("team_code"),
             teamName: safe.optNullableString("team_name"),
             fallbackReason: safe.optNullableString("fallback_reason"),
-            profileConfigured: safe.optBool("profile_configured", defaultValue: false)
+            profileConfigured: safe.optBool("profile_configured", defaultValue: false),
+            orgDepartmentName: orgDeptName
         )
     }
 
@@ -1614,8 +1644,15 @@ public enum LeaveContract {
         )
     }
 
-    public static func parseBalanceProjection(_ obj: [String: Any]?, defaultYear: Int) -> LeaveBalanceProjection {
+    public static func parseBalanceProjection(
+        _ obj: [String: Any]?,
+        defaultYear: Int,
+        fallbackOrgDepartmentName: String? = nil
+    ) -> LeaveBalanceProjection {
         let safe = obj ?? [:]
+        let orgDeptName = (safe["org_department"] as? [String: Any])?.optNullableString("department_name", "name")
+            ?? safe.optNullableString("department_name")
+            ?? fallbackOrgDepartmentName
         let lotsArr = safe.optObjectArray("lots")
         let lots: [LeaveLotProjection] = lotsArr.map { item in
             LeaveLotProjection(
@@ -1666,7 +1703,8 @@ public enum LeaveContract {
             pendingPaidUnits: pendingPaid,
             pendingUnpaidUnits: pendingUnpaid,
             approvedUnpaidUnits: approvedUnpaid,
-            lots: lots
+            lots: lots,
+            orgDepartmentName: orgDeptName
         )
     }
 
@@ -1769,6 +1807,8 @@ public enum LeaveContract {
             )
         }
         let leaveYear = dataObj.optInt("leave_year", defaultValue: currentVietnamLeaveYear())
+        let orgDeptObj = dataObj["org_department"] as? [String: Any]
+        let orgDeptName = orgDeptObj?.optNullableString("department_name", "name")
         let requests = dataObj.optObjectArray("requests").map { parseRequestProjection($0) }
         let ledgerEntries = dataObj.optObjectArray("ledger_entries").map { l in
             LeaveLedgerEntryProjection(
@@ -1790,11 +1830,12 @@ public enum LeaveContract {
             leaveYear: leaveYear,
             account: parseAccountProjection(dataObj["account"] as? [String: Any]),
             authority: authority,
-            routing: parseRoutingProjection(dataObj["routing"] as? [String: Any]),
+            routing: parseRoutingProjection(dataObj["routing"] as? [String: Any], fallbackOrgDepartmentName: orgDeptName),
             policy: parsePolicyProjection(dataObj["policy"] as? [String: Any]),
-            balance: parseBalanceProjection(dataObj["balance"] as? [String: Any], defaultYear: leaveYear),
+            balance: parseBalanceProjection(dataObj["balance"] as? [String: Any], defaultYear: leaveYear, fallbackOrgDepartmentName: orgDeptName),
             requests: requests,
-            ledgerEntries: ledgerEntries
+            ledgerEntries: ledgerEntries,
+            orgDepartmentName: orgDeptName
         )
         return .success(summary)
     }

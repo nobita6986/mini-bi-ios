@@ -3225,7 +3225,7 @@ final class HRPBTests: XCTestCase {
             id: "aaaa0023-2222-4333-8444-555555555501",
             username: "full.user",
             fullName: "Full User",
-            permissions: ["entry_create", "submission_create", "entry_read"],
+            permissions: ["entry_create", "submission_create", "entry_read", "entry_own"],
             allowedWorkerTabs: ["managed", "recruited"]
         )
         let limitedUser = MiniBiUser(
@@ -3241,7 +3241,7 @@ final class HRPBTests: XCTestCase {
         )
         XCTAssertEqual(
             MiniBiNavDestination.resolveMainNavigationDestinations(for: limitedUser),
-            [.dashboard, .workReports, .attendance, .recruitment]
+            [.workReports, .attendance, .recruitment]
         )
         XCTAssertFalse(MiniBiNavDestination.resolveMainNavigationDestinations(for: fullUser).contains(.newEntry))
         XCTAssertTrue(fullUser.canAccessNewWorkerEntry)
@@ -4648,7 +4648,7 @@ final class HRPBTests: XCTestCase {
             id: "aaaa1111-2222-4333-8444-555555555555",
             username: "reviewer.user",
             fullName: "Reviewer User",
-            permissions: ["work_report_review"]
+            permissions: ["report_review"]
         )
         vm.isAuthenticated = true
 
@@ -4748,7 +4748,7 @@ final class HRPBTests: XCTestCase {
             id: "aaaa1111-2222-4333-8444-555555555555",
             username: "admin.user",
             fullName: "Admin User",
-            permissions: ["entry_read"],
+            permissions: ["entry_read", "entry_admin"],
             allowedWorkerTabs: ["all"]
         )
         vm.isAuthenticated = true
@@ -5562,7 +5562,7 @@ final class HRPBTests: XCTestCase {
             id: "aaaa1111-2222-4333-8444-555555555555",
             username: "admin.user",
             fullName: "Admin User",
-            permissions: ["entry_read"],
+            permissions: ["entry_read", "entry_admin"],
             allowedWorkerTabs: ["all"],
             scopes: [ActorScopeGrant(kind: "all", reference: nil)]
         )
@@ -6063,5 +6063,592 @@ final class HRPBTests: XCTestCase {
         XCTAssertEqual(postReqs.count, 1)
         XCTAssertTrue(postReqs[0].bodyString.contains("\"status\":\"OFF\""))
         XCTAssertTrue(postReqs[0].bodyString.contains("\"leave_reason\":\"Nghỉ việc cá nhân\""))
+    }
+
+    // MARK: - Build 169: Attendance Metadata, Work Reports Analytics, RBAC & Leave Dept Fallback
+
+    func testAttendanceOutbox11KeyMetadataContract() throws {
+        let expectedKeys: Set<String> = [
+            "latitude",
+            "longitude",
+            "accuracy_meters",
+            "address_hint",
+            "client_captured_at",
+            "note",
+            "idempotency_key",
+            "photo_sha256",
+            "time_source",
+            "time_token",
+            "elapsed_since_anchor_ms"
+        ]
+
+        // 1. DEVICE_CLOCK_UNVERIFIED -> exact 11 keys, NSNull for time_token & elapsed_since_anchor_ms
+        let unverifiedItem = AttendanceOutboxItem(
+            localId: "att-local-1",
+            userKey: "nv001",
+            idempotencyKey: "att-11111111-2222-4333-8444-555555555501",
+            clientCapturedAt: "2026-11-26T08:30:00.000+07:00",
+            timeSource: AttendanceTimeContract.sourceDeviceClockUnverified,
+            timeToken: "stale-should-not-send",
+            elapsedSinceAnchorMs: 1200,
+            lat: 21.0285,
+            lng: 105.8542,
+            accuracyM: 12.5,
+            photoSha256: "sha256-abc",
+            photoSizeBytes: 2048,
+            note: "Ca sáng",
+            createdAtEpochMs: 1_764_120_600_000
+        )
+        let unverifiedMeta = AttendanceOutboxService.buildCheckInMetadataObject(for: unverifiedItem)
+        XCTAssertEqual(Set(unverifiedMeta.keys), expectedKeys)
+        XCTAssertEqual(unverifiedMeta["idempotency_key"] as? String, "11111111-2222-4333-8444-555555555501")
+        XCTAssertEqual(unverifiedMeta["time_source"] as? String, AttendanceTimeContract.sourceDeviceClockUnverified)
+        XCTAssertEqual(unverifiedMeta["address_hint"] as? String, "")
+        XCTAssertEqual(unverifiedMeta["note"] as? String, "Ca sáng")
+        XCTAssertEqual(unverifiedMeta["accuracy_meters"] as? Double, 12.5)
+        XCTAssertTrue(unverifiedMeta["time_token"] is NSNull, "DEVICE_CLOCK_UNVERIFIED must emit NSNull for time_token")
+        XCTAssertTrue(unverifiedMeta["elapsed_since_anchor_ms"] is NSNull, "DEVICE_CLOCK_UNVERIFIED must emit NSNull for elapsed_since_anchor_ms")
+
+        let unverifiedJsonData = try JSONSerialization.data(withJSONObject: unverifiedMeta)
+        let unverifiedJsonObj = try XCTUnwrap(JSONSerialization.jsonObject(with: unverifiedJsonData) as? [String: Any])
+        XCTAssertTrue(unverifiedJsonObj["time_token"] is NSNull)
+        XCTAssertTrue(unverifiedJsonObj["elapsed_since_anchor_ms"] is NSNull)
+
+        // 2. SERVER_ANCHORED -> exact 11 keys, non-null time_token & elapsed_since_anchor_ms
+        let anchoredItem = AttendanceOutboxItem(
+            localId: "att-local-2",
+            userKey: "nv001",
+            idempotencyKey: "22222222-2222-4333-8444-555555555502",
+            clientCapturedAt: "2026-11-26T08:35:00.000+07:00",
+            timeSource: AttendanceTimeContract.sourceServerAnchored,
+            timeToken: "anchor-jwt-token-xyz",
+            elapsedSinceAnchorMs: 45_200,
+            lat: 21.0285,
+            lng: 105.8542,
+            accuracyM: -5.0,
+            photoSha256: "sha256-def",
+            photoSizeBytes: 2048,
+            note: "",
+            createdAtEpochMs: 1_764_120_900_000
+        )
+        let anchoredMeta = AttendanceOutboxService.buildCheckInMetadataObject(for: anchoredItem)
+        XCTAssertEqual(Set(anchoredMeta.keys), expectedKeys)
+        XCTAssertEqual(anchoredMeta["accuracy_meters"] as? Double, 15.0)
+        XCTAssertEqual(anchoredMeta["time_source"] as? String, AttendanceTimeContract.sourceServerAnchored)
+        XCTAssertEqual(anchoredMeta["time_token"] as? String, "anchor-jwt-token-xyz")
+        XCTAssertEqual(anchoredMeta["elapsed_since_anchor_ms"] as? Int64, 45_200)
+    }
+
+    @MainActor
+    func testWorkReportsAnalyticsContractOptionsOverviewBreakdownAndSubTabGates() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.pathDelaySec = [:]
+
+        let tplId1 = "11111111-aaaa-4bbb-8ccc-000000000001"
+        let tplId2 = "22222222-aaaa-4bbb-8ccc-000000000002"
+        var returnEmptyTemplates = false
+
+        MockURLProtocol.requestHandler = { req in
+            let url = try XCTUnwrap(req.url)
+            let path = url.path
+            let body: String
+            if path == "/api/work-reports/analytics/options" {
+                if returnEmptyTemplates {
+                    body = """
+                    {
+                      "ok": true,
+                      "data": {
+                        "effective_scope": "TEAM",
+                        "templates": [],
+                        "teams": [],
+                        "assignees": []
+                      }
+                    }
+                    """
+                } else {
+                    body = """
+                    {
+                      "ok": true,
+                      "data": {
+                        "effective_scope": "ALL",
+                        "templates": [
+                          {"template_id": "\(tplId1)", "code": "DAILY_RECRUIT", "name": "Báo cáo Tuyển dụng Ngày", "period_type": "DAILY"},
+                          {"template_id": "\(tplId2)", "code": "WEEKLY_OPS", "name": "Báo cáo Tuần Vận hành", "period_type": "WEEKLY"}
+                        ],
+                        "teams": [
+                          {"team_id": "team_north", "label": "Miền Bắc"}
+                        ],
+                        "assignees": [
+                          {"assignee_id": "usr_1", "display_name": "Nguyễn Văn A"}
+                        ]
+                      }
+                    }
+                    """
+                }
+            } else if path == "/api/work-reports/analytics/overview" {
+                body = """
+                {
+                  "ok": true,
+                  "data": {
+                    "compliance": {
+                      "due_count": 20,
+                      "completed_count": 16,
+                      "on_time_count": 14,
+                      "late_submitted_count": 2,
+                      "pending_due_count": 1,
+                      "overdue_missing_count": 2,
+                      "exempted_count": 1,
+                      "pending_review_count": 3,
+                      "completion_rate": 0.8
+                    },
+                    "metrics": [
+                      {
+                        "metric_key": "new_candidates",
+                        "label": "Ứng viên mới",
+                        "unit": "người",
+                        "sum_value": 124,
+                        "avg_value": 7.75,
+                        "count_valid": 16
+                      },
+                      {
+                        "metric_key": "dropout_rate",
+                        "label": "Ghi chú định tính",
+                        "unit": "",
+                        "sum_value": null,
+                        "avg_value": null,
+                        "count_valid": 0
+                      }
+                    ]
+                  }
+                }
+                """
+            } else if path == "/api/work-reports/analytics/breakdown" {
+                body = """
+                {
+                  "ok": true,
+                  "data": {
+                    "items": [
+                      {
+                        "team_id": "team_north",
+                        "team_name": "Miền Bắc",
+                        "compliance": {
+                          "due_count": 10,
+                          "completed_count": 9,
+                          "overdue_missing_count": 1,
+                          "completion_rate": 0.9
+                        }
+                      }
+                    ]
+                  }
+                }
+                """
+            } else {
+                body = #"{"ok":true,"items":[]}"#
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(body.utf8))
+        }
+
+        let client = makeMockHttpClient()
+        let service = WorkReportsAndReportingService(httpClient: client)
+
+        // 1. fetchAnalyticsOptions calls /api/work-reports/analytics/options (never /templates/selectable)
+        let optsRes = await service.fetchAnalyticsOptions()
+        guard case .success(let opts, _) = optsRes else {
+            XCTFail("Expected fetchAnalyticsOptions to succeed")
+            return
+        }
+        XCTAssertEqual(opts.effectiveScope, "ALL")
+        XCTAssertEqual(opts.templates.count, 2)
+        XCTAssertEqual(opts.templates[0].templateId, tplId1)
+        XCTAssertEqual(opts.templates[0].id, tplId1)
+        XCTAssertEqual(opts.teams.first?.label, "Miền Bắc")
+        XCTAssertEqual(opts.assignees.first?.label, "Nguyễn Văn A")
+
+        // 2. fetchAnalyticsSnapshot sends only allowlist params and parses compliance + metrics + breakdown
+        let snapRes = await service.fetchAnalyticsSnapshot(
+            templateId: tplId1,
+            fromDate: "2026-11-01",
+            toDate: "2026-11-26",
+            teamId: "team_north",
+            assigneeId: "usr_1",
+            finality: "FINAL"
+        )
+        guard case .success(let snapshot, _) = snapRes else {
+            XCTFail("Expected fetchAnalyticsSnapshot to succeed")
+            return
+        }
+        XCTAssertEqual(snapshot.selectedTemplateId, tplId1)
+        XCTAssertEqual(snapshot.kpis.totalObligations, 20)
+        XCTAssertEqual(snapshot.kpis.submittedCount, 16)
+        XCTAssertEqual(snapshot.kpis.onTimeCount, 14)
+        XCTAssertEqual(snapshot.kpis.lateSubmittedCount, 2)
+        XCTAssertEqual(snapshot.kpis.pendingDueCount, 1)
+        XCTAssertEqual(snapshot.kpis.overdueCount, 2)
+        XCTAssertEqual(snapshot.kpis.exemptedCount, 1)
+        XCTAssertEqual(snapshot.kpis.pendingReviewCount, 3)
+        XCTAssertEqual(snapshot.kpis.completionRate, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(snapshot.metrics.count, 2)
+        XCTAssertEqual(snapshot.metrics[0].metricKey, "new_candidates")
+        XCTAssertEqual(snapshot.metrics[0].sumValue, 124)
+        XCTAssertEqual(snapshot.metrics[0].avgValue, 7.75)
+        XCTAssertEqual(snapshot.metrics[0].countValid, 16)
+        XCTAssertNil(snapshot.metrics[1].sumValue)
+        XCTAssertNil(snapshot.metrics[1].avgValue)
+        XCTAssertEqual(snapshot.byUnit.count, 1)
+        XCTAssertEqual(snapshot.byUnit[0].groupLabel, "Miền Bắc")
+        XCTAssertEqual(snapshot.byUnit[0].submittedCount, 9)
+        XCTAssertEqual(snapshot.byUnit[0].overdueCount, 1)
+
+        let urls = MockURLProtocol.recordedUrls()
+        XCTAssertTrue(urls.contains(where: { $0.contains("/api/work-reports/analytics/options") }))
+        XCTAssertFalse(urls.contains(where: { $0.contains("/templates/selectable") }))
+        XCTAssertFalse(urls.contains(where: { $0.contains("/analytics/summary") }))
+        let overviewUrl = try XCTUnwrap(urls.first(where: { $0.contains("/api/work-reports/analytics/overview") }))
+        let overviewComponents = try XCTUnwrap(URLComponents(string: overviewUrl))
+        let overviewNames = Set((overviewComponents.queryItems ?? []).map(\.name))
+        XCTAssertEqual(overviewNames, ["template_id", "from", "to", "team_id", "assignee_id", "finality"])
+        XCTAssertFalse(overviewNames.contains("template_code"))
+        XCTAssertFalse(overviewNames.contains("period_type"))
+        XCTAssertFalse(overviewNames.contains("period_key"))
+
+        // 3. Empty templates skips /analytics/overview + visibleWorkReportsSubTabs gating
+        let baseUser = MiniBiUser(id: "u1", username: "emp", fullName: "Nhân Viên", permissions: [])
+        let scopeReviewer = MiniBiUser(
+            id: "u2",
+            username: "lead",
+            fullName: "Trưởng Nhóm",
+            permissions: [],
+            effectiveReportReviewScopes: ["team_north"]
+        )
+        let analyticsViewer = MiniBiUser(
+            id: "u3",
+            username: "ana",
+            fullName: "Phân Tích",
+            permissions: ["report_analytics_view"]
+        )
+        let fullUser = MiniBiUser(
+            id: "u4",
+            username: "full",
+            fullName: "Quản Lý",
+            permissions: ["report_review", "report_analytics_view"]
+        )
+        XCTAssertEqual(WorkReportsSubTab.visibleTabs(for: baseUser), [.actionable, .history])
+        XCTAssertEqual(WorkReportsSubTab.visibleTabs(for: scopeReviewer), [.actionable, .history, .reviewQueue])
+        XCTAssertEqual(WorkReportsSubTab.visibleTabs(for: analyticsViewer), [.actionable, .history, .analytics])
+        XCTAssertEqual(WorkReportsSubTab.visibleTabs(for: fullUser), [.actionable, .history, .reviewQueue, .analytics])
+
+        returnEmptyTemplates = true
+        MockURLProtocol.resetRecordedUrls()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.wr169.\(UUID().uuidString)"))
+        let vm = MiniBiViewModel(repository: repo, workReportsService: service)
+        vm.currentUser = analyticsViewer
+        vm.isAuthenticated = true
+        vm.selectedWorkReportsSubTab = .reviewQueue
+        await vm.loadWorkReportsData(force: true)
+
+        XCTAssertEqual(vm.visibleWorkReportsSubTabs, [.actionable, .history, .analytics])
+        XCTAssertEqual(vm.selectedWorkReportsSubTab, .actionable, "Unauthorized reviewQueue sub-tab must clamp to actionable")
+        XCTAssertTrue(vm.workReportTemplates.isEmpty)
+        XCTAssertEqual(vm.selectedWorkReportAnalyticsTemplateId, "")
+        let emptyRunUrls = MockURLProtocol.recordedUrls()
+        XCTAssertTrue(emptyRunUrls.contains(where: { $0.contains("/api/work-reports/analytics/options") }))
+        XCTAssertFalse(emptyRunUrls.contains(where: { $0.contains("/api/work-reports/analytics/overview") }), "Empty templates must skip /analytics/overview")
+        XCTAssertFalse(emptyRunUrls.contains(where: { $0.contains("/api/work-reports/reviews") }), "User without review capability or scopes must skip /reviews")
+    }
+
+    @MainActor
+    func testRbacDashboardWorkforceDeepTeamCatalogAndDirectEditCatalogGate() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.pathDelaySec = [:]
+
+        let entryId = "cccc1690-1111-4222-8333-444444444444"
+        var catalogStatusCode = 200
+
+        MockURLProtocol.requestHandler = { req in
+            let url = try XCTUnwrap(req.url)
+            let path = url.path
+            if path == "/api/direct-entry/catalog" {
+                let resp = HTTPURLResponse(url: url, statusCode: catalogStatusCode, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                let body = catalogStatusCode == 200
+                    ? #"{"ok":true,"projects":[{"project_id":"p1","display_name":"Dự án P1"}],"recruiters":[],"banks":[],"labor_types":[]}"#
+                    : #"{"ok":false,"error":{"code":"FORBIDDEN","message":"Forbidden"}}"#
+                return (resp, Data(body.utf8))
+            } else if path == "/api/direct-entry/entries/\(entryId)" {
+                let body = """
+                {
+                  "ok": true,
+                  "entry": {
+                    "entry_id": "\(entryId)",
+                    "version": 1,
+                    "employee_code": "hrp-2026-169001",
+                    "display_name": "Lê Văn Sửa",
+                    "project_id": "p1",
+                    "project_display": "Dự án P1",
+                    "recruiter_id": "rec-1",
+                    "recruiter_display": "Tuyển 1",
+                    "labor_type": "thoi_vu",
+                    "labor_type_display": "Thời vụ",
+                    "first_work_date": "2026-11-20",
+                    "employment_status": {"status": "ON", "effective_date": "2026-11-20", "version": 1},
+                    "allowed_actions": {"view": true, "direct_edit": true}
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path == "/api/reporting/workforce-deep" {
+                let body = """
+                {
+                  "ok": true,
+                  "workforce": {
+                    "snapshot": {"eligible_episode_total": 10, "on_count": 8, "off_count": 2, "unconfirmed_count": 0},
+                    "dimensions": {"by_team": {"buckets": []}}
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path == "/api/admin/catalog/teams" {
+                let body = #"{"ok":true,"items":[{"team_id":"t1","team_code":"TEAM_1","display_name":"Team 1"}]}"#
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(#"{"ok":true,"items":[]}"#.utf8))
+        }
+
+        // 1. EMPLOYEE_BASE hides .dashboard
+        let employeeBase = MiniBiUser(
+            id: "emp-base-1",
+            username: "emp.base",
+            fullName: "Nhân Viên Cơ Bản",
+            permissions: [],
+            allowedWorkerTabs: []
+        )
+        XCTAssertFalse(employeeBase.canAccessDashboard)
+        XCTAssertFalse(MiniBiNavDestination.resolveMainNavigationDestinations(for: employeeBase).contains(.dashboard))
+
+        // 2. HR_OPERATOR (scopes: [all], permissions: ["entry_read", "entry_direct_edit"]) must NOT call /api/reporting/workforce-deep
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.rbac169.\(UUID().uuidString)"))
+        let directEntry = DirectEntryService(httpClient: client)
+        let reporting = WorkReportsAndReportingService(httpClient: client)
+        let vm = MiniBiViewModel(repository: repo, directEntryService: directEntry, workReportsService: reporting)
+
+        let hrOperator = MiniBiUser(
+            id: "hr-op-1",
+            username: "hr.op",
+            fullName: "HR Operator",
+            permissions: ["entry_read", "entry_direct_edit"],
+            allowedWorkerTabs: ["all"],
+            scopes: [ActorScopeGrant(kind: "all", reference: nil)]
+        )
+        vm.currentUser = hrOperator
+        vm.isAuthenticated = true
+        vm.applyDatePreset(.all, reload: false)
+        await vm.loadDashboardData(force: true)
+
+        XCTAssertFalse(
+            MockURLProtocol.recordedUrls().contains(where: { $0.contains("/api/reporting/workforce-deep") }),
+            "HR_OPERATOR without entry_admin or report_analytics_view must NOT call workforce-deep"
+        )
+
+        // 3. Old capability strings ("admin", "team_manage", "catalog_manage", "user_manage") do NOT unlock /api/admin/catalog/teams;
+        //    new capabilities ("team_master_manage") DO unlock it.
+        MockURLProtocol.resetRecordedUrls()
+        vm.currentUser = MiniBiUser(
+            id: "legacy-cap-1",
+            username: "legacy.viewer",
+            fullName: "Legacy Viewer",
+            permissions: ["report_analytics_view", "admin", "team_manage", "catalog_manage", "user_manage"],
+            allowedWorkerTabs: ["all"],
+            scopes: [ActorScopeGrant(kind: "all", reference: nil)]
+        )
+        await vm.loadDashboardData(force: true)
+        XCTAssertTrue(MockURLProtocol.recordedUrls().contains(where: { $0.contains("/api/reporting/workforce-deep") }))
+        XCTAssertFalse(
+            MockURLProtocol.recordedUrls().contains(where: { $0.contains("/api/admin/catalog/teams") }),
+            "Old capability strings must NOT trigger /api/admin/catalog/teams"
+        )
+
+        MockURLProtocol.resetRecordedUrls()
+        vm.currentUser = MiniBiUser(
+            id: "new-cap-1",
+            username: "team.master",
+            fullName: "Team Master",
+            permissions: ["report_analytics_view", "team_master_manage"],
+            allowedWorkerTabs: ["all"],
+            scopes: [ActorScopeGrant(kind: "all", reference: nil)]
+        )
+        await vm.loadDashboardData(force: true)
+        XCTAssertTrue(
+            MockURLProtocol.recordedUrls().contains(where: { $0.contains("/api/admin/catalog/teams") }),
+            "New team_master_manage capability must trigger /api/admin/catalog/teams"
+        )
+
+        // 4. Direct Edit: HR_OPERATOR (without entry_create / entry_own) loads /api/direct-entry/catalog?effective_date=...
+        //    and fails silently when catalog returns 403.
+        MockURLProtocol.resetRecordedUrls()
+        vm.currentUser = hrOperator
+        vm.directEntryOptions = DirectEntryAssigneeOptions()
+        catalogStatusCode = 403
+        let worker = WorkerItem(maNld: entryId, hoTen: "Lê Văn Sửa", canDirectEdit: true)
+        await vm.openDirectEdit(worker)
+
+        let catalogUrlsOn403 = MockURLProtocol.recordedUrls().filter { $0.contains("/api/direct-entry/catalog") }
+        XCTAssertEqual(catalogUrlsOn403.count, 1)
+        XCTAssertTrue(catalogUrlsOn403[0].contains("effective_date="))
+        XCTAssertNil(vm.directEditErrorMessage, "403 from catalog during openDirectEdit must fail silently")
+        XCTAssertNil(vm.bannerMessage, "403 from catalog during openDirectEdit must not set bannerMessage")
+        XCTAssertEqual(vm.directEditBaselineDetail?.entryId, entryId)
+
+        MockURLProtocol.resetRecordedUrls()
+        catalogStatusCode = 200
+        vm.directEntryOptions = DirectEntryAssigneeOptions()
+        await vm.openDirectEdit(worker)
+        let catalogUrlsOn200 = MockURLProtocol.recordedUrls().filter { $0.contains("/api/direct-entry/catalog") }
+        XCTAssertEqual(catalogUrlsOn200.count, 1)
+        XCTAssertTrue(catalogUrlsOn200[0].contains("effective_date="))
+        XCTAssertEqual(vm.directEntryOptions.catalogProjects.first?.projectId, "p1")
+    }
+
+    @MainActor
+    func testResolveRealFullNameIfHandleSendsPageSize1AndEffectiveDate() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.requestHandler = { req in
+            let url = try XCTUnwrap(req.url)
+            let path = url.path
+            let body: String
+            if path == "/api/attendance/history" {
+                body = #"{"ok":true,"data":{"items":[]}}"#
+            } else if path == "/api/work-reports/obligations" {
+                body = #"{"ok":true,"items":[]}"#
+            } else if path == "/api/leave/me" {
+                body = """
+                {
+                  "ok": true,
+                  "data": {
+                    "account": {
+                      "app_user_id": "aaaa1690-1111-4222-8333-444444444441",
+                      "display_name": "linhnt.td",
+                      "recruiter_id": "rec-linh-1"
+                    }
+                  }
+                }
+                """
+            } else if path == "/api/direct-entry/catalog" {
+                body = """
+                {
+                  "ok": true,
+                  "projects": [],
+                  "recruiters": [
+                    {"recruiter_id": "rec-linh-1", "display_name": "Nguyễn Thùy Linh"}
+                  ],
+                  "banks": [],
+                  "labor_types": []
+                }
+                """
+            } else {
+                body = #"{"ok":true}"#
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(body.utf8))
+        }
+
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.handle169.\(UUID().uuidString)"))
+        let handleUser = MiniBiUser(
+            id: "aaaa1690-1111-4222-8333-444444444441",
+            username: "linhnt.td",
+            fullName: "linhnt.td",
+            permissions: ["entry_read"],
+            selfRecruiterSuggestion: "rec-linh-1"
+        )
+        let resolved = await repo.resolveRealFullNameIfHandle(for: handleUser)
+        XCTAssertEqual(resolved.fullName, "Nguyễn Thùy Linh")
+
+        let historyUrl = try XCTUnwrap(MockURLProtocol.recordedUrls().first(where: { $0.contains("/api/attendance/history") }))
+        XCTAssertTrue(historyUrl.contains("page_size=1"), "Must send page_size=1 on /api/attendance/history: \(historyUrl)")
+        XCTAssertFalse(historyUrl.contains("limit=1"), "Must never send limit=1 on /api/attendance/history: \(historyUrl)")
+
+        let catalogUrl = try XCTUnwrap(MockURLProtocol.recordedUrls().first(where: { $0.contains("/api/direct-entry/catalog") }))
+        XCTAssertTrue(catalogUrl.contains("effective_date="), "Must send effective_date= on /api/direct-entry/catalog: \(catalogUrl)")
+    }
+
+    func testLeaveParseMyLeaveSummaryAndDisplayLabelOrgDepartmentFallback() throws {
+        let userId = "aaaa1690-1111-4222-8333-555555555501"
+        let meJson: [String: Any] = [
+            "ok": true,
+            "data": [
+                "as_of_date": "2026-11-27",
+                "leave_year": 2026,
+                "org_department": [
+                    "department_id": "dept_ops",
+                    "department_name": "Khối Vận Hành"
+                ],
+                "account": [
+                    "app_user_id": userId,
+                    "display_name": "Trần Văn An",
+                    "account_enabled": true
+                ],
+                "authority": [
+                    "app_user_id": userId,
+                    "can_submit_request": true
+                ],
+                "routing": [
+                    "route_kind": "DEPARTMENT_HEAD",
+                    "unit_kind": "UNCLASSIFIED",
+                    "profile_configured": true
+                ],
+                "balance": [
+                    "leave_year": 2026,
+                    "as_of_date": "2026-11-27",
+                    "has_profile": true,
+                    "profile_configured": true,
+                    "employment_status": "OFFICIAL",
+                    "unit_kind": "UNCLASSIFIED",
+                    "available_units": 10
+                ],
+                "requests": [],
+                "ledger_entries": []
+            ]
+        ]
+
+        let result = LeaveContract.parseMyLeaveSummary(meJson)
+        guard case .success(let summary, _) = result else {
+            XCTFail("Expected parseMyLeaveSummary to succeed")
+            return
+        }
+
+        XCTAssertEqual(summary.orgDepartmentName, "Khối Vận Hành")
+        XCTAssertEqual(summary.balance.unitKind, "UNCLASSIFIED")
+        XCTAssertEqual(summary.balance.orgDepartmentName, "Khối Vận Hành")
+        XCTAssertEqual(summary.routing.unitKind, "UNCLASSIFIED")
+        XCTAssertEqual(summary.routing.orgDepartmentName, "Khối Vận Hành")
+
+        XCTAssertEqual(
+            LeaveContract.leaveUnitDisplayLabel(
+                unitKind: summary.balance.unitKind,
+                orgDepartmentName: summary.balance.orgDepartmentName ?? summary.orgDepartmentName
+            ),
+            "Khối Vận Hành"
+        )
+        XCTAssertEqual(
+            LeaveContract.leaveUnitDisplayLabel(
+                unitKind: "RECRUITMENT",
+                orgDepartmentName: "Khối Vận Hành"
+            ),
+            LeaveContract.leaveUnitKindLabel("RECRUITMENT")
+        )
+        XCTAssertEqual(
+            LeaveContract.leaveRouteKindLabel(
+                summary.routing.routeKind,
+                teamName: summary.routing.teamName,
+                unitKind: summary.routing.unitKind,
+                orgDepartmentName: summary.routing.orgDepartmentName ?? summary.orgDepartmentName
+            ),
+            "Trưởng bộ phận (Khối Vận Hành)"
+        )
     }
 }

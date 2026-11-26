@@ -424,6 +424,9 @@ public final class MiniBiViewModel: ObservableObject {
     @Published public var selectedReviewDetail: WorkReportReviewItem?
     @Published public var workReportTemplates: [WorkReportTemplateOption] = []
     @Published public var workReportAnalytics: WorkReportsAnalyticsSnapshot = WorkReportsAnalyticsSnapshot()
+    @Published public var workReportAnalyticsOptions: WorkReportAnalyticsOptions = WorkReportAnalyticsOptions()
+    @Published public var selectedWorkReportAnalyticsTemplateId: String = ""
+    @Published public var isLoadingWorkReportAnalytics: Bool = false
 
     // MARK: - Pagination Load-More State for Workers & CCCD
     @Published public var isLoadingMoreWorkers: Bool = false
@@ -966,6 +969,10 @@ public final class MiniBiViewModel: ObservableObject {
         selectedReviewDetail = nil
         workReportTemplates = []
         workReportAnalytics = WorkReportsAnalyticsSnapshot()
+        workReportAnalyticsOptions = WorkReportAnalyticsOptions()
+        selectedWorkReportAnalyticsTemplateId = ""
+        isLoadingWorkReportAnalytics = false
+        selectedWorkReportsSubTab = .actionable
         isLoadingDashboard = false
         isLoadingWorkReports = false
         isLoadingCccdReview = false
@@ -1291,11 +1298,12 @@ public final class MiniBiViewModel: ObservableObject {
     }
 
     private var canCurrentUserManageTeamCatalog: Bool {
-        let perms = Set((currentUser?.permissions ?? []).map { $0.lowercased() })
-        return perms.contains("admin")
-            || perms.contains("team_manage")
-            || perms.contains("catalog_manage")
-            || perms.contains("user_manage")
+        let perms = Set((currentUser?.permissions ?? []).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        })
+        return perms.contains("entry_admin")
+            || perms.contains("team_master_manage")
+            || perms.contains("catalog_master_manage")
     }
 
     public func setDashboardScope(_ scope: String, reload: Bool = true) {
@@ -1379,10 +1387,11 @@ public final class MiniBiViewModel: ObservableObject {
             }
 
             let user = self.currentUser
-            let hasAllScope = user?.hasScopeKind("all") == true
-            var shouldLoadScopedFallback = !hasAllScope
+            let canLoadWorkforceDeep = user?.hasScopeKind("all") == true
+                && (user?.hasCapability("entry_admin") == true || user?.hasCapability("report_analytics_view") == true)
+            var shouldLoadScopedFallback = !canLoadWorkforceDeep
 
-            if hasAllScope {
+            if canLoadWorkforceDeep {
                 self.canViewTeamReport = true
                 self.scopedTeamReportsByKey = [:]
                 let deepRes = await self.workReportsService.fetchWorkforceDeepDashboard(
@@ -1888,10 +1897,10 @@ public final class MiniBiViewModel: ObservableObject {
         }
     }
 
-    public func loadDirectEntryAssigneeOptions(force: Bool = false) async {
+    public func loadDirectEntryAssigneeOptions(force: Bool = false, allowForDirectEdit: Bool = false) async {
         guard isAuthenticated,
               let user = currentUser,
-              user.canLoadDirectEntryCatalog,
+              (user.canLoadDirectEntryCatalog || allowForDirectEdit),
               captureSessionToken() != nil else {
             directEntryOptions = DirectEntryAssigneeOptions()
             directEntryService.clearCatalogCache()
@@ -2342,7 +2351,7 @@ public final class MiniBiViewModel: ObservableObject {
         directEditFileStatuses = [:]
 
         if directEntryOptions.catalogProjects.isEmpty {
-            await loadDirectEntryAssigneeOptions()
+            await loadDirectEntryAssigneeOptions(allowForDirectEdit: true)
             guard !Task.isCancelled,
                   isSessionValid(token),
                   openDirectEditGeneration == expectedOpenGen,
@@ -4970,8 +4979,20 @@ public final class MiniBiViewModel: ObservableObject {
 
     // MARK: - Work Reports Actions (Including `is_overdue` & `WORK_REPORT_DEADLINE_PASSED` Contract)
 
+    public var visibleWorkReportsSubTabs: [WorkReportsSubTab] {
+        WorkReportsSubTab.visibleTabs(for: currentUser)
+    }
+
+    public func normalizeSelectedWorkReportsSubTab() {
+        let visible = visibleWorkReportsSubTabs
+        if !visible.contains(selectedWorkReportsSubTab) {
+            selectedWorkReportsSubTab = visible.first ?? .actionable
+        }
+    }
+
     public func loadWorkReportsData(force: Bool = false) async {
         guard captureSessionToken() != nil else { return }
+        normalizeSelectedWorkReportsSubTab()
         await runDeduplicatedSessionTask(key: "work_reports", force: force) { [weak self] token in
             guard let self, self.isSessionValid(token) else { return }
             self.isLoadingWorkReports = true
@@ -4981,30 +5002,100 @@ public final class MiniBiViewModel: ObservableObject {
                 }
             }
 
+            self.normalizeSelectedWorkReportsSubTab()
             await self.loadWorkReportObligations()
             guard !Task.isCancelled, self.isSessionValid(token) else { return }
 
-            async let reviewsTask = self.workReportsService.fetchPendingReviews(
-                cursor: nil,
-                pageSize: Self.leaveInboxPageSize
-            )
-            async let templatesTask = self.workReportsService.fetchSelectableTemplates()
-            async let analyticsTask = self.workReportsService.fetchAnalyticsSnapshot()
+            let canReview = self.currentUser?.canViewWorkReportReviewQueue == true
+            let canAnalytics = self.currentUser?.canViewWorkReportAnalytics == true
+
+            if !canReview {
+                self.workReportReviews = []
+                self.workReportReviewsPage = 1
+                self.workReportReviewsNextCursor = nil
+                self.workReportReviewsHasMore = false
+            }
+            if !canAnalytics {
+                self.workReportAnalyticsOptions = WorkReportAnalyticsOptions()
+                self.workReportTemplates = []
+                self.workReportAnalytics = WorkReportsAnalyticsSnapshot()
+                self.selectedWorkReportAnalyticsTemplateId = ""
+                self.isLoadingWorkReportAnalytics = false
+            }
+
+            async let reviewsTask: MiniBiApiResult<[WorkReportReviewItem]>? = canReview
+                ? self.workReportsService.fetchPendingReviews(cursor: nil, pageSize: Self.leaveInboxPageSize)
+                : nil
+            async let optionsTask: MiniBiApiResult<WorkReportAnalyticsOptions>? = canAnalytics
+                ? self.workReportsService.fetchAnalyticsOptions()
+                : nil
 
             let revRes = await reviewsTask
-            let tplRes = await templatesTask
-            let anaRes = await analyticsTask
+            let optsRes = await optionsTask
             guard !Task.isCancelled, self.isSessionValid(token) else { return }
 
-            if case .success(let revs, _) = revRes {
+            if let revRes, case .success(let revs, _) = revRes {
                 self.workReportReviews = revs
                 self.workReportReviewsPage = 1
                 self.workReportReviewsNextCursor = self.workReportsService.lastPendingReviewsNextCursor
                 self.workReportReviewsHasMore = self.workReportsService.lastPendingReviewsHasMore
                     && !(self.workReportReviewsNextCursor ?? "").isEmpty
             }
-            if case .success(let tpls, _) = tplRes { self.workReportTemplates = tpls }
-            if case .success(let ana, _) = anaRes { self.workReportAnalytics = ana }
+
+            if let optsRes, case .success(let opts, _) = optsRes {
+                self.workReportAnalyticsOptions = opts
+                self.workReportTemplates = opts.templates
+                if opts.templates.isEmpty {
+                    self.selectedWorkReportAnalyticsTemplateId = ""
+                    self.workReportAnalytics = WorkReportsAnalyticsSnapshot()
+                } else {
+                    let currentSelected = self.selectedWorkReportAnalyticsTemplateId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let targetTemplateId: String
+                    if !currentSelected.isEmpty,
+                       opts.templates.contains(where: { $0.templateId == currentSelected }) {
+                        targetTemplateId = currentSelected
+                    } else {
+                        targetTemplateId = opts.templates.first?.templateId ?? ""
+                    }
+                    self.selectedWorkReportAnalyticsTemplateId = targetTemplateId
+                    if !targetTemplateId.isEmpty {
+                        self.isLoadingWorkReportAnalytics = true
+                        let anaRes = await self.workReportsService.fetchAnalyticsSnapshot(templateId: targetTemplateId)
+                        guard !Task.isCancelled, self.isSessionValid(token) else { return }
+                        self.isLoadingWorkReportAnalytics = false
+                        if case .success(let ana, _) = anaRes {
+                            self.workReportAnalytics = ana
+                        }
+                    } else {
+                        self.workReportAnalytics = WorkReportsAnalyticsSnapshot()
+                    }
+                }
+            }
+        }
+    }
+
+    public func selectWorkReportAnalyticsTemplate(_ templateId: String) async {
+        let cleanId = templateId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let token = captureSessionToken(),
+              currentUser?.canViewWorkReportAnalytics == true,
+              !cleanId.isEmpty else {
+            return
+        }
+        selectedWorkReportAnalyticsTemplateId = cleanId
+        isLoadingWorkReportAnalytics = true
+        defer {
+            if isSessionValid(token), selectedWorkReportAnalyticsTemplateId == cleanId {
+                isLoadingWorkReportAnalytics = false
+            }
+        }
+        let res = await workReportsService.fetchAnalyticsSnapshot(templateId: cleanId)
+        guard !Task.isCancelled,
+              isSessionValid(token),
+              selectedWorkReportAnalyticsTemplateId == cleanId else {
+            return
+        }
+        if case .success(let ana, _) = res {
+            self.workReportAnalytics = ana
         }
     }
 

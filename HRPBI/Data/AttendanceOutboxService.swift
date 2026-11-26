@@ -808,6 +808,47 @@ public final class AttendanceOutboxService {
 
     // MARK: - Process Single Item
 
+    private static func normalizedIdempotencyKey(_ rawKey: String) -> String {
+        if rawKey.hasPrefix("att-") {
+            return String(rawKey.dropFirst(4))
+        }
+        return rawKey
+    }
+
+    /// Builds the canonical 11-key `metadata` JSON object per `check-in-contract.ts` (`ALLOWED_METADATA_KEYS`).
+    /// Always populates all 11 keys: `accuracy_meters` is a finite non-negative `Double`, `address_hint` & `note`
+    /// are non-null `String`s, `idempotency_key` is normalized without `"att-"` prefix, and `time_token` /
+    /// `elapsed_since_anchor_ms` are populated when `SERVER_ANCHORED` with valid anchor data or explicitly `NSNull()` otherwise.
+    public static func buildCheckInMetadataObject(for item: AttendanceOutboxItem) -> [String: Any] {
+        let safeAccuracy: Double = {
+            if let acc = item.accuracyM, acc.isFinite && acc >= 0 {
+                return acc
+            }
+            return 15.0
+        }()
+        var metadataObj: [String: Any] = [
+            "latitude": item.lat,
+            "longitude": item.lng,
+            "accuracy_meters": safeAccuracy,
+            "address_hint": "",
+            "client_captured_at": item.clientCapturedAt,
+            "note": item.note,
+            "idempotency_key": normalizedIdempotencyKey(item.idempotencyKey),
+            "photo_sha256": item.photoSha256,
+            "time_source": item.timeSource
+        ]
+        if item.timeSource == AttendanceTimeContract.sourceServerAnchored,
+           let token = item.timeToken, !token.isEmpty,
+           let elapsed = item.elapsedSinceAnchorMs, elapsed >= 0 {
+            metadataObj["time_token"] = token
+            metadataObj["elapsed_since_anchor_ms"] = elapsed
+        } else {
+            metadataObj["time_token"] = NSNull()
+            metadataObj["elapsed_since_anchor_ms"] = NSNull()
+        }
+        return metadataObj
+    }
+
     public func processSingleOutboxItem(localId: String) async -> MiniBiApiResult<AttendanceOutboxItem> {
         lock.lock()
         if inFlightLocalIds.contains(localId) {
@@ -847,41 +888,8 @@ public final class AttendanceOutboxService {
             return .failure(message: item.lastErrorMessage ?? "Thiếu tệp ảnh.", errorCode: "MISSING_LOCAL_PHOTO")
         }
 
-        // Normalize idempotencyKey to pure UUID if any legacy item had "att-" prefix
-        let cleanIdempotencyKey: String = {
-            if item.idempotencyKey.hasPrefix("att-") {
-                return String(item.idempotencyKey.dropFirst(4))
-            }
-            return item.idempotencyKey
-        }()
-
-        // Build canonical `metadata` JSON object per `check-in-contract.ts` (ALLOWED_METADATA_KEYS)
-        // Mirrors Android's `AttendanceOutboxService.buildMetadataJson` 100%:
-        // accuracy_meters is always a finite non-negative Double, address_hint & note are non-null Strings,
-        // and time_token / elapsed_since_anchor_ms are only included when SERVER_ANCHORED.
-        let safeAccuracy: Double = {
-            if let acc = item.accuracyM, acc.isFinite && acc >= 0 {
-                return acc
-            }
-            return 15.0
-        }()
-        var metadataObj: [String: Any] = [
-            "latitude": item.lat,
-            "longitude": item.lng,
-            "accuracy_meters": safeAccuracy,
-            "address_hint": "",
-            "client_captured_at": item.clientCapturedAt,
-            "note": item.note,
-            "idempotency_key": cleanIdempotencyKey,
-            "photo_sha256": item.photoSha256,
-            "time_source": item.timeSource
-        ]
-        if item.timeSource == AttendanceTimeContract.sourceServerAnchored,
-           let token = item.timeToken, !token.isEmpty,
-           let elapsed = item.elapsedSinceAnchorMs, elapsed >= 0 {
-            metadataObj["time_token"] = token
-            metadataObj["elapsed_since_anchor_ms"] = elapsed
-        }
+        let cleanIdempotencyKey = Self.normalizedIdempotencyKey(item.idempotencyKey)
+        let metadataObj = Self.buildCheckInMetadataObject(for: item)
 
         guard let metadataJsonData = try? JSONSerialization.data(withJSONObject: metadataObj),
               let metadataJsonString = String(data: metadataJsonData, encoding: .utf8) else {

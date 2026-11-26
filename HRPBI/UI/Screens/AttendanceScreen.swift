@@ -1283,10 +1283,10 @@ public struct AttendanceScreen: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text("Trạng thái nhân sự: \(LeaveContract.leaveEmploymentStatusLabel(balance.employmentStatus)) • Đơn vị: \(LeaveContract.leaveUnitKindLabel(balance.unitKind))")
+                Text("Trạng thái nhân sự: \(LeaveContract.leaveEmploymentStatusLabel(balance.employmentStatus)) • Đơn vị: \(LeaveContract.leaveUnitDisplayLabel(unitKind: balance.unitKind, orgDepartmentName: balance.orgDepartmentName ?? summary.orgDepartmentName))")
                     .font(.caption.weight(.semibold))
                     .foregroundColor(SemanticColors.textPrimary)
-                Text("Luồng duyệt đơn: \(LeaveContract.leaveRouteKindLabel(routing.routeKind, teamName: routing.teamName, unitKind: routing.unitKind))")
+                Text("Luồng duyệt đơn: \(LeaveContract.leaveRouteKindLabel(routing.routeKind, teamName: routing.teamName, unitKind: routing.unitKind, orgDepartmentName: routing.orgDepartmentName ?? summary.orgDepartmentName))")
                     .font(.caption)
                     .foregroundColor(SemanticColors.textPrimary)
                 Text("Ngày vào làm: \(LeaveContract.formatIsoDateVi(balance.workStartDate)) • Lên chính thức: \(LeaveContract.formatIsoDateVi(balance.officialEffectiveDate))")

@@ -447,6 +447,7 @@ public final class MiniBiRepository {
         guard !cleanUserId.isEmpty else {
             var copy = user
             copy.allowedWorkerTabs = []
+            copy.effectiveReportReviewScopes = []
             return copy
         }
         let response = await httpClient.request(method: "GET", path: "/api/direct-entry/session")
@@ -454,6 +455,7 @@ public final class MiniBiRepository {
             var copy = user
             copy.allowedWorkerTabs = []
             copy.scopes = []
+            copy.effectiveReportReviewScopes = []
             return copy
         }
         let resolvedTabs = Self.parseDirectEntrySessionAllowedWorkerTabs(
@@ -469,6 +471,11 @@ public final class MiniBiRepository {
                     copy.scopes = Self.parseActorScopes(actorObj["scopes"])
                 } else if resolvedTabs.isEmpty {
                     copy.scopes = []
+                }
+                if actorObj["effective_report_review_scopes"] != nil {
+                    copy.effectiveReportReviewScopes = Self.parseEffectiveReportReviewScopes(
+                        actorObj["effective_report_review_scopes"]
+                    )
                 }
                 let directCapabilities = actorObj.optStringArray("capabilities") + actorObj.optStringArray("permissions")
                 if !directCapabilities.isEmpty {
@@ -493,7 +500,11 @@ public final class MiniBiRepository {
                         copy.fullName = candidate
                     }
                 }
+            } else {
+                copy.effectiveReportReviewScopes = []
             }
+        } else {
+            copy.effectiveReportReviewScopes = []
         }
         return copy
     }
@@ -515,11 +526,11 @@ public final class MiniBiRepository {
             return resolved
         }
 
-        // 2a. GET /api/attendance/history?limit=1 -> data.items[0].employee_display_name (or items[0].employee_display_name)
+        // 2a. GET /api/attendance/history?page_size=1 -> data.items[0].employee_display_name (or items[0].employee_display_name)
         let attResp = await httpClient.request(
             method: "GET",
             path: "/api/attendance/history",
-            queryItems: [URLQueryItem(name: "limit", value: "1")]
+            queryItems: [URLQueryItem(name: "page_size", value: "1")]
         )
         if attResp.isSuccess, let root = attResp.jsonObject {
             let dataObj = (root["data"] as? [String: Any]) ?? root
@@ -603,7 +614,11 @@ public final class MiniBiRepository {
         }
 
         if !candidateRecruiterKeys.isEmpty {
-            let catResp = await httpClient.request(method: "GET", path: "/api/direct-entry/catalog")
+            let catResp = await httpClient.request(
+                method: "GET",
+                path: "/api/direct-entry/catalog",
+                queryItems: [URLQueryItem(name: "effective_date", value: LeaveContract.todayVietnamIsoDate())]
+            )
             if catResp.isSuccess, let root = catResp.jsonObject {
                 let catObj = (root["catalog"] as? [String: Any])
                     ?? (root["data"] as? [String: Any])
@@ -944,6 +959,14 @@ public final class MiniBiRepository {
         }
         let rawScopeKinds = parsedScopes.map(\.kind)
 
+        var effectiveReportReviewScopes = parseEffectiveReportReviewScopes(obj["effective_report_review_scopes"])
+        if effectiveReportReviewScopes.isEmpty {
+            effectiveReportReviewScopes = parseEffectiveReportReviewScopes(fallbackRoot?["effective_report_review_scopes"])
+        }
+        if effectiveReportReviewScopes.isEmpty, let rootActor = fallbackRoot?["actor"] as? [String: Any] {
+            effectiveReportReviewScopes = parseEffectiveReportReviewScopes(rootActor["effective_report_review_scopes"])
+        }
+
         // Fail-closed: only read canonical `allowed_worker_tabs`; never read `allowed_worker_scopes`
         // and never infer worker tabs from `scopes` or `capabilities`.
         let allowedWorkerTabs = parseAllowedWorkerTabs(obj["allowed_worker_tabs"])
@@ -986,8 +1009,43 @@ public final class MiniBiRepository {
             permissions: capabilities,
             allowedWorkerTabs: allowedWorkerTabs,
             selfRecruiterSuggestion: selfRecruiterSuggestion,
-            scopes: parsedScopes
+            scopes: parsedScopes,
+            effectiveReportReviewScopes: effectiveReportReviewScopes
         )
+    }
+
+    public static func parseEffectiveReportReviewScopes(_ raw: Any?) -> [String] {
+        guard let raw, !(raw is NSNull) else { return [] }
+        var seen = Set<String>()
+        var result: [String] = []
+
+        func appendScope(_ value: String?) {
+            let clean = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !clean.isEmpty else { return }
+            let key = clean.lowercased()
+            guard !seen.contains(key) else { return }
+            seen.insert(key)
+            result.append(clean)
+        }
+
+        if let strings = raw as? [String] {
+            for item in strings {
+                appendScope(item)
+            }
+        } else if let dicts = raw as? [[String: Any]] {
+            for d in dicts {
+                appendScope(d.optNullableString("scope", "kind", "team_id", "id"))
+            }
+        } else if let arr = raw as? [Any] {
+            for elem in arr {
+                if let str = elem as? String {
+                    appendScope(str)
+                } else if let d = elem as? [String: Any] {
+                    appendScope(d.optNullableString("scope", "kind", "team_id", "id"))
+                }
+            }
+        }
+        return result
     }
 
     public static func parseActorScopes(_ raw: Any?) -> [ActorScopeGrant] {
