@@ -24,7 +24,7 @@ public struct WorkReportsScreen: View {
             // Sub-tab selector
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(WorkReportsSubTab.allCases) { tab in
+                    ForEach(viewModel.visibleWorkReportsSubTabs) { tab in
                         let isSelected = viewModel.selectedWorkReportsSubTab == tab
                         let countBadge = badgeCount(for: tab)
                         Button {
@@ -121,6 +121,7 @@ public struct WorkReportsScreen: View {
         .background(theme.background)
         .dismissKeyboardOnTapOutside()
         .onAppear {
+            viewModel.normalizeSelectedWorkReportsSubTab()
             if viewModel.workReportObligations.isEmpty {
                 Task { await viewModel.loadWorkReportsData() }
             }
@@ -527,47 +528,188 @@ public struct WorkReportsScreen: View {
         let theme = viewModel.selectedTheme
 
         return VStack(alignment: .leading, spacing: 14) {
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                analyticsKpiCard("Tổng nghĩa vụ", "\(kpis.totalObligations)", theme.primary)
-                analyticsKpiCard("Đã nộp / Hoàn thành", "\(kpis.submittedCount) (\(WorkReportsContract.formatPercentVi(kpis.completionRate)))", SemanticColors.successText)
-                analyticsKpiCard("Đã phê duyệt", "\(kpis.approvedCount)", SemanticColors.infoText)
-                analyticsKpiCard("Quá hạn nộp", "\(kpis.overdueCount)", SemanticColors.dangerText)
-            }
-
-            if !viewModel.workReportAnalytics.byUnit.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Tỷ lệ hoàn thành theo Đơn vị")
-                        .font(.headline)
-                    ForEach(viewModel.workReportAnalytics.byUnit) { row in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text(row.groupLabel)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundColor(SemanticColors.textPrimary)
-                                Spacer()
-                                Text(WorkReportsContract.formatPercentVi(row.completionRate))
-                                    .font(.caption.weight(.bold))
-                                    .monospacedDigit()
-                                    .foregroundColor(theme.primary)
-                            }
-                            HrpSegmentedBar(
-                                activeCount: row.submittedCount,
-                                inactiveCount: row.overdueCount,
-                                otherCount: max(0, row.totalObligations - row.submittedCount - row.overdueCount),
-                                height: 6
-                            )
-                            Text("Đã nộp \(row.submittedCount)/\(row.totalObligations) · Quá hạn \(row.overdueCount)")
-                                .font(.caption2)
-                                .monospacedDigit()
-                                .foregroundColor(SemanticColors.textSecondary)
-                        }
-                        .padding(.vertical, 4)
-                    }
+            if viewModel.workReportTemplates.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "chart.bar.xaxis")
+                        .font(.title2)
+                        .foregroundColor(SemanticColors.textMuted)
+                    Text("Chưa có biểu mẫu báo cáo nào trong phạm vi thống kê.")
+                        .font(.subheadline)
+                        .foregroundColor(SemanticColors.textSecondary)
+                        .multilineTextAlignment(.center)
                 }
-                .padding(14)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 28)
+                .padding(.horizontal, 16)
                 .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+            } else {
+                // Template selector chips
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(viewModel.workReportTemplates) { tpl in
+                            let isSelected = viewModel.selectedWorkReportAnalyticsTemplateId == tpl.templateId
+                            Button {
+                                if !isSelected {
+                                    HapticsManager.selection()
+                                    Task {
+                                        await viewModel.selectWorkReportAnalyticsTemplate(tpl.templateId)
+                                    }
+                                }
+                            } label: {
+                                Text(tpl.name)
+                                    .font(.caption.weight(isSelected ? .bold : .medium))
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .frame(minHeight: 36)
+                                    .background(isSelected ? theme.primary : SemanticColors.surfaceMuted)
+                                    .foregroundColor(isSelected ? .white : SemanticColors.textSecondary)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        if viewModel.isLoadingWorkReportAnalytics {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                                .padding(.horizontal, 6)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                // Compliance KPI cards
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    analyticsKpiCard("Đến hạn", "\(kpis.totalObligations)", theme.primary)
+                    analyticsKpiCard("Hoàn thành", "\(kpis.submittedCount) (\(WorkReportsContract.formatPercentVi(kpis.completionRate)))", SemanticColors.successText)
+                    analyticsKpiCard("Chờ duyệt", "\(kpis.pendingReviewCount)", SemanticColors.warningText)
+                    analyticsKpiCard("Quá hạn thiếu", "\(kpis.overdueCount)", SemanticColors.dangerText)
+                }
+
+                // Aggregated metrics card
+                if !viewModel.workReportAnalytics.metrics.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Chỉ số tổng hợp")
+                            .font(.headline)
+                            .foregroundColor(SemanticColors.textPrimary)
+
+                        ForEach(viewModel.workReportAnalytics.metrics) { metric in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Text(metric.label)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundColor(SemanticColors.textPrimary)
+                                    if !metric.unit.isEmpty {
+                                        Text("(\(metric.unit))")
+                                            .font(.caption)
+                                            .foregroundColor(SemanticColors.textSecondary)
+                                    }
+                                    Spacer()
+                                    Text("Hợp lệ: \(metric.countValid)")
+                                        .font(.caption2.weight(.medium))
+                                        .monospacedDigit()
+                                        .foregroundColor(SemanticColors.textMuted)
+                                }
+
+                                HStack(spacing: 12) {
+                                    analyticsMetricStatPill(
+                                        title: "Tổng",
+                                        value: formatAnalyticsMetricNumber(metric.sumValue, unit: metric.unit),
+                                        accent: theme.primary
+                                    )
+                                    analyticsMetricStatPill(
+                                        title: "Trung bình",
+                                        value: formatAnalyticsMetricNumber(metric.avgValue, unit: metric.unit),
+                                        accent: SemanticColors.infoText
+                                    )
+                                }
+                            }
+                            .padding(.vertical, 4)
+
+                            if metric.id != viewModel.workReportAnalytics.metrics.last?.id {
+                                Divider()
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+                }
+
+                // Unit breakdown card
+                if !viewModel.workReportAnalytics.byUnit.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Tỷ lệ hoàn thành theo Đơn vị")
+                            .font(.headline)
+                            .foregroundColor(SemanticColors.textPrimary)
+                        ForEach(viewModel.workReportAnalytics.byUnit) { row in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text(row.groupLabel)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundColor(SemanticColors.textPrimary)
+                                    Spacer()
+                                    Text(WorkReportsContract.formatPercentVi(row.completionRate))
+                                        .font(.caption.weight(.bold))
+                                        .monospacedDigit()
+                                        .foregroundColor(theme.primary)
+                                }
+                                HrpSegmentedBar(
+                                    activeCount: row.submittedCount,
+                                    inactiveCount: row.overdueCount,
+                                    otherCount: max(0, row.totalObligations - row.submittedCount - row.overdueCount),
+                                    height: 6
+                                )
+                                Text("Hoàn thành \(row.submittedCount)/\(row.totalObligations) · Quá hạn \(row.overdueCount)")
+                                    .font(.caption2)
+                                    .monospacedDigit()
+                                    .foregroundColor(SemanticColors.textSecondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .padding(14)
+                    .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+                }
             }
         }
+    }
+
+    private func analyticsMetricStatPill(title: String, value: String, accent: Color) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(SemanticColors.textSecondary)
+            Spacer(minLength: 4)
+            Text(value)
+                .font(.subheadline.weight(.bold))
+                .monospacedDigit()
+                .foregroundColor(accent)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity)
+        .background(SemanticColors.surfaceMuted)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func formatAnalyticsMetricNumber(_ value: Double?, unit: String) -> String {
+        guard let value else { return "—" }
+        let formatted: String
+        if value.rounded() == value && abs(value) < 1_000_000_000 {
+            let nf = NumberFormatter()
+            nf.numberStyle = .decimal
+            nf.locale = Locale(identifier: "vi_VN")
+            nf.maximumFractionDigits = 0
+            formatted = nf.string(from: NSNumber(value: value)) ?? String(format: "%.0f", value)
+        } else {
+            let nf = NumberFormatter()
+            nf.numberStyle = .decimal
+            nf.locale = Locale(identifier: "vi_VN")
+            nf.minimumFractionDigits = 0
+            nf.maximumFractionDigits = 2
+            formatted = nf.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
+        }
+        return unit.isEmpty ? formatted : "\(formatted) \(unit)"
     }
 
     private func analyticsKpiCard(_ title: String, _ value: String, _ color: Color) -> some View {

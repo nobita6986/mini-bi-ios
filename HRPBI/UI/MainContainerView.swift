@@ -86,84 +86,123 @@ public struct MainContainerView: View {
                         }
                     }
 
-                    Spacer()
+                    Spacer(minLength: 6)
 
-                    // Task Reminder Bell with Enabled Count Badge (>= 44x44pt hit target)
-                    Button {
-                        HapticsManager.lightImpact()
-                        viewModel.refreshTaskReminders()
-                        viewModel.isTaskReminderSheetPresented = true
-                    } label: {
-                        ZStack(alignment: .topTrailing) {
-                            Image(systemName: "bell.fill")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundColor(theme.primary)
-                                .frame(width: 36, height: 36)
-                                .background(Color.white.opacity(0.92))
-                                .clipShape(Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(theme.topBarBorder, lineWidth: 0.8)
-                                )
-                            if viewModel.enabledRemindersCount > 0 {
-                                Text("\(min(99, viewModel.enabledRemindersCount))")
-                                    .font(.system(size: 10, weight: .bold).monospacedDigit())
-                                    .contentTransition(.numericText())
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 2)
-                                    .background(Color.red)
-                                    .foregroundColor(.white)
-                                    .clipShape(Capsule())
-                                    .offset(x: 4, y: -2)
+                    HStack(spacing: 6) {
+                        // HRPartner Bulletin ("Bản tin HRPartner") Button right next to Task Reminder Bell
+                        Button {
+                            HapticsManager.lightImpact()
+                            viewModel.isBulletinSheetPresented = true
+                        } label: {
+                            ZStack(alignment: .topTrailing) {
+                                Image(systemName: "newspaper.fill")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(theme.primary)
+                                    .frame(width: 36, height: 36)
+                                    .background(Color.white.opacity(0.92))
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(theme.topBarBorder, lineWidth: 0.8)
+                                    )
+                                if viewModel.unreadBulletinCount > 0 {
+                                    Text("\(min(99, viewModel.unreadBulletinCount))")
+                                        .font(.system(size: 10, weight: .bold).monospacedDigit())
+                                        .contentTransition(.numericText())
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color.red)
+                                        .foregroundColor(.white)
+                                        .clipShape(Capsule())
+                                        .offset(x: 4, y: -2)
+                                }
                             }
+                            .frame(minWidth: 40, minHeight: 44)
+                            .contentShape(Rectangle())
                         }
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(HrpPressableButtonStyle())
+                        .buttonStyle(HrpPressableButtonStyle())
+                        .accessibilityLabel("Bản tin HRPartner")
+                        .accessibilityIdentifier("topbar_bulletin_button")
 
-                    // Theme Selector & Logout Menu (>= 44x44pt hit target)
-                    Menu {
-                        Section("Giao diện màu sắc") {
-                            ForEach(MiniBiThemes.all) { palette in
-                                Button {
-                                    HapticsManager.selection()
-                                    viewModel.selectTheme(palette)
-                                } label: {
-                                    HStack {
-                                        Text(palette.name)
-                                        if palette.id == theme.id {
-                                            Image(systemName: "checkmark")
+                        // Task Reminder Bell with Enabled Count Badge (>= 40x44pt hit target)
+                        Button {
+                            HapticsManager.lightImpact()
+                            viewModel.refreshTaskReminders()
+                            viewModel.isTaskReminderSheetPresented = true
+                        } label: {
+                            ZStack(alignment: .topTrailing) {
+                                Image(systemName: "bell.fill")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(theme.primary)
+                                    .frame(width: 36, height: 36)
+                                    .background(Color.white.opacity(0.92))
+                                    .clipShape(Circle())
+                                    .overlay(
+                                        Circle()
+                                            .stroke(theme.topBarBorder, lineWidth: 0.8)
+                                    )
+                                if viewModel.enabledRemindersCount > 0 {
+                                    Text("\(min(99, viewModel.enabledRemindersCount))")
+                                        .font(.system(size: 10, weight: .bold).monospacedDigit())
+                                        .contentTransition(.numericText())
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color.red)
+                                        .foregroundColor(.white)
+                                        .clipShape(Capsule())
+                                        .offset(x: 4, y: -2)
+                                }
+                            }
+                            .frame(minWidth: 40, minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(HrpPressableButtonStyle())
+                        .accessibilityLabel("Nhắc việc")
+                        .accessibilityIdentifier("topbar_reminder_button")
+
+                        // Theme Selector & Logout Menu (>= 44x44pt hit target)
+                        Menu {
+                            Section("Giao diện màu sắc") {
+                                ForEach(MiniBiThemes.all) { palette in
+                                    Button {
+                                        HapticsManager.selection()
+                                        viewModel.selectTheme(palette)
+                                    } label: {
+                                        HStack {
+                                            Text(palette.name)
+                                            if palette.id == theme.id {
+                                                Image(systemName: "checkmark")
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        Divider()
-                        Button(role: .destructive) {
-                            HapticsManager.warning()
-                            Task { await viewModel.performLogout() }
+                            Divider()
+                            Button(role: .destructive) {
+                                HapticsManager.warning()
+                                Task { await viewModel.performLogout() }
+                            } label: {
+                                Label("Đăng xuất", systemImage: "rectangle.portrait.and.arrow.right")
+                            }
                         } label: {
-                            Label("Đăng xuất", systemImage: "rectangle.portrait.and.arrow.right")
+                            HStack(spacing: 4) {
+                                Image(systemName: "ellipsis.circle.fill")
+                                    .font(.subheadline)
+                                Text("Menu")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.92))
+                            .foregroundColor(theme.primary)
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(theme.primary.opacity(0.26), lineWidth: 0.8)
+                            )
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                         }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "ellipsis.circle.fill")
-                                .font(.subheadline)
-                            Text("Menu")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.92))
-                        .foregroundColor(theme.primary)
-                        .clipShape(Capsule())
-                        .overlay(
-                            Capsule()
-                                .stroke(theme.primary.opacity(0.26), lineWidth: 0.8)
-                        )
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(Rectangle())
                     }
                 }
                 .padding(.horizontal, 12)
@@ -312,6 +351,10 @@ public struct MainContainerView: View {
                 }
                 .ignoresSafeArea(edges: .bottom)
             )
+        }
+        .sheet(isPresented: $viewModel.isBulletinSheetPresented) {
+            HrpBulletinSheet(viewModel: viewModel)
+                .hrpSheetPresentation(detents: [.medium, .large])
         }
         .sheet(isPresented: $viewModel.isTaskReminderSheetPresented) {
             TaskReminderSheet(viewModel: viewModel)

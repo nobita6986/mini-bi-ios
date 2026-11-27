@@ -436,10 +436,39 @@ public final class TaskReminderManager: ObservableObject {
         center.removePendingNotificationRequests(withIdentifiers: [requestId])
         center.removeDeliveredNotifications(withIdentifiers: [requestId])
     }
+
+    public func postBulletinSystemNotification(
+        bulletin: HrpBulletinItem,
+        delaySeconds: TimeInterval = 1.0
+    ) {
+        guard scheduleSystemNotifications else { return }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            guard granted else { return }
+            let requestId = "\(HrpBulletinContract.notificationRequestPrefix)\(bulletin.id)"
+            center.removePendingNotificationRequests(withIdentifiers: [requestId])
+
+            let content = UNMutableNotificationContent()
+            content.title = "Bản tin HRPartner · \(bulletin.categoryDisplay)"
+            content.subtitle = bulletin.title
+            content.body = bulletin.summary
+            content.sound = .default
+            content.userInfo = [
+                "bulletin_id": bulletin.id,
+                "type": "HR_BULLETIN"
+            ]
+
+            let safeDelay = max(0.5, delaySeconds)
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: safeDelay, repeats: false)
+            let request = UNNotificationRequest(identifier: requestId, content: content, trigger: trigger)
+            center.add(request, withCompletionHandler: nil)
+        }
+    }
 }
 
 public final class TaskReminderNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     public static let shared = TaskReminderNotificationDelegate()
+    public var onOpenBulletinNotification: ((String) -> Void)?
 
     private override init() {
         super.init()
@@ -476,6 +505,11 @@ public final class TaskReminderNotificationDelegate: NSObject, UNUserNotificatio
         if let reminderId = userInfo["reminder_id"] as? String {
             Task { @MainActor in
                 _ = TaskReminderManager.shared.onNotificationTriggered(id: reminderId)
+            }
+        }
+        if let bulletinId = userInfo["bulletin_id"] as? String, !bulletinId.isEmpty {
+            Task { @MainActor in
+                self.onOpenBulletinNotification?(bulletinId)
             }
         }
         completionHandler()

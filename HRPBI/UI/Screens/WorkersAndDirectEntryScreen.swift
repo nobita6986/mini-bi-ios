@@ -2235,6 +2235,28 @@ struct WorkerDetailSheet: View {
                         dismiss()
                     }
                 }
+                if worker.canDirectEdit || entryDetail?.canDirectEdit == true {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button {
+                            HapticsManager.selection()
+                            var editableWorker = worker
+                            editableWorker.canDirectEdit = true
+                            viewModel.selectedWorkerDetail = nil
+                            dismiss()
+                            Task {
+                                try? await Task.sleep(nanoseconds: 220_000_000)
+                                await viewModel.openDirectEdit(editableWorker)
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "square.and.pencil")
+                                Text("Sửa hồ sơ")
+                            }
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(theme.primary)
+                        }
+                    }
+                }
             }
             .task {
                 await loadFullWorkerDetail()
@@ -2471,7 +2493,9 @@ struct WorkerDirectEditSheet: View {
                             personalSection()
                             employmentSection()
                             paymentSection()
-                            documentsSection(detail: detail)
+                            if viewModel.currentUser?.hasCapability("document_upload") == true {
+                                documentsSection(detail: detail)
+                            }
                         }
                     }
                     .padding(14)
@@ -2691,29 +2715,29 @@ struct WorkerDirectEditSheet: View {
                 "Số CCCD (12 chữ số)",
                 text: $form.soCccd,
                 keyboard: .numberPad,
-                error: fieldError("national_id_number", "so_cccd")
+                error: fieldError("national_id", "national_id_number")
             )
             directEditTextField(
                 "Ngày cấp CCCD (DD/MM/YYYY)",
                 text: $form.ngayCapCccd,
                 placeholder: "VD: 20/10/2021",
-                error: fieldError("national_id_issue_date", "ngay_cap_cccd")
+                error: fieldError("national_id_issued_at", "national_id_issue_date")
             )
             directEditTextField(
                 "Nơi cấp CCCD",
                 text: $form.noiCapCccd,
-                error: fieldError("noi_cap_cccd")
+                error: fieldError("national_id_issued_place", "noi_cap_cccd")
             )
             directEditTextField(
                 "Địa chỉ / Quê quán",
                 text: $form.queQuan,
-                error: fieldError("que_quan")
+                error: fieldError("address", "que_quan")
             )
             directEditTextField(
                 "Số điện thoại",
                 text: $form.sdt,
                 keyboard: .phonePad,
-                error: fieldError("sdt")
+                error: fieldError("phone", "sdt")
             )
         }
         .padding(14)
@@ -2739,7 +2763,7 @@ struct WorkerDirectEditSheet: View {
             directEditPickerButton(
                 label: "Dự án",
                 value: form.duAn.isEmpty ? "Chọn dự án..." : form.duAn,
-                error: fieldError("du_an")
+                error: fieldError("project_id", "du_an")
             ) {
                 KeyboardDismissal.dismiss()
                 showProjectPicker = true
@@ -2748,7 +2772,7 @@ struct WorkerDirectEditSheet: View {
             directEditPickerButton(
                 label: "Loại hình lao động",
                 value: form.nganhNghe.isEmpty ? "Chọn loại hình lao động..." : form.nganhNghe,
-                error: fieldError("nganh_nghe")
+                error: fieldError("labor_type", "nganh_nghe")
             ) {
                 KeyboardDismissal.dismiss()
                 showLaborTypePicker = true
@@ -2757,7 +2781,7 @@ struct WorkerDirectEditSheet: View {
             directEditPickerButton(
                 label: "Người tuyển",
                 value: form.nguoiTuyen.isEmpty ? "Chọn người tuyển..." : form.nguoiTuyen,
-                error: fieldError("nguoi_tuyen")
+                error: fieldError("recruiter_id", "nguoi_tuyen")
             ) {
                 KeyboardDismissal.dismiss()
                 showRecruiterPicker = true
@@ -2767,7 +2791,7 @@ struct WorkerDirectEditSheet: View {
                 "Ngày bắt đầu (DD/MM/YYYY)",
                 text: $form.ngayVaoLam,
                 placeholder: "VD: 01/10/2026",
-                error: fieldError("started_on", "ngay_vao_lam")
+                error: fieldError("first_work_date", "started_on")
             )
 
             VStack(alignment: .leading, spacing: 6) {
@@ -2775,22 +2799,26 @@ struct WorkerDirectEditSheet: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundColor(SemanticColors.textSecondary)
                 HStack(spacing: 8) {
+                    let isOn = form.employmentStatusCode.uppercased() == "ON"
                     let isOff = form.employmentStatusCode.uppercased() == "OFF"
                     Button {
                         form.employmentStatusCode = "ON"
                     } label: {
                         Text("Đang làm")
-                            .font(.caption.weight(!isOff ? .bold : .medium))
+                            .font(.caption.weight(isOn ? .bold : .medium))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
-                            .background(!isOff ? theme.primaryLight : Color(hex: 0xF8FAFC))
-                            .foregroundColor(!isOff ? theme.primary : SemanticColors.textSecondary)
+                            .background(isOn ? theme.primaryLight : Color(hex: 0xF8FAFC))
+                            .foregroundColor(isOn ? theme.primary : SemanticColors.textSecondary)
                             .cornerRadius(8)
                     }
                     .buttonStyle(.plain)
 
                     Button {
                         form.employmentStatusCode = "OFF"
+                        if form.employmentEffectiveDate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            form.employmentEffectiveDate = DirectEntryContract.isoDateToUiDate(LeaveContract.todayVietnamIsoDate())
+                        }
                     } label: {
                         Text("Đã nghỉ")
                             .font(.caption.weight(isOff ? .bold : .medium))
@@ -2809,13 +2837,13 @@ struct WorkerDirectEditSheet: View {
                     "Ngày hiệu lực nghỉ việc (DD/MM/YYYY) *",
                     text: $form.employmentEffectiveDate,
                     placeholder: "VD: 30/10/2026",
-                    error: fieldError("effective_date", "employment_effective_date")
+                    error: fieldError("employment_effective_date", "effective_date")
                 )
                 directEditTextField(
                     "Lý do nghỉ việc *",
                     text: $form.leaveReason,
                     placeholder: "Nhập lý do nghỉ việc...",
-                    error: fieldError("reason")
+                    error: fieldError("employment_leave_reason", "reason")
                 )
             }
         }
@@ -2835,12 +2863,12 @@ struct WorkerDirectEditSheet: View {
             directEditTextField(
                 "Tên chủ tài khoản",
                 text: $form.chuTaiKhoan,
-                error: fieldError("payment", "chu_tai_khoan")
+                error: fieldError("account_holder_name", "payment")
             )
             directEditTextField(
                 "Số tài khoản",
                 text: $form.soTaiKhoan,
-                error: fieldError("so_tai_khoan")
+                error: fieldError("account_number", "so_tai_khoan")
             )
 
             let bankLabel: String = {

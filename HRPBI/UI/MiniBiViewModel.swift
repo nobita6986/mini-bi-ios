@@ -49,16 +49,35 @@ public final class MiniBiViewModel: ObservableObject {
     public private(set) var nextAllowedOutboxFlushElapsedMs: Int64 = 0
     public var backoffJitterProvider: () -> Double = { Double.random(in: 0.0...1.0) }
 
-    // MARK: - Notifications (SSE + List) & Local Task Reminders
+    // MARK: - Notifications (SSE + List), Local Task Reminders & HRPartner Bulletin
     @Published public var notifications: [AppNotificationItem] = []
     @Published public var unreadNotificationCount: Int = 0
     @Published public var isNotificationSheetPresented: Bool = false
     @Published public var isTaskReminderSheetPresented: Bool = false
     @Published public var taskReminders: [TaskReminderItem] = []
+    @Published public var isBulletinSheetPresented: Bool = false
+    @Published public var bulletinItems: [HrpBulletinItem] = HrpBulletinItem.defaultMockupItems
+    @Published public var selectedBulletinCategory: HrpBulletinCategory = .all
+    @Published public var selectedBulletinDetailId: String? = nil
     private var announcedNotificationIds: Set<Int64> = []
 
     public var enabledRemindersCount: Int {
         taskReminders.filter { $0.isEnabled }.count
+    }
+
+    public var filteredBulletinItems: [HrpBulletinItem] {
+        if selectedBulletinCategory == .all {
+            return bulletinItems
+        }
+        return bulletinItems.filter { $0.category == selectedBulletinCategory }
+    }
+
+    public var pinnedBulletinCount: Int {
+        bulletinItems.filter { $0.isPinned }.count
+    }
+
+    public var unreadBulletinCount: Int {
+        bulletinItems.filter { !$0.isRead }.count
     }
 
     // MARK: - Dashboard & CCCD Review State
@@ -405,6 +424,9 @@ public final class MiniBiViewModel: ObservableObject {
     @Published public var selectedReviewDetail: WorkReportReviewItem?
     @Published public var workReportTemplates: [WorkReportTemplateOption] = []
     @Published public var workReportAnalytics: WorkReportsAnalyticsSnapshot = WorkReportsAnalyticsSnapshot()
+    @Published public var workReportAnalyticsOptions: WorkReportAnalyticsOptions = WorkReportAnalyticsOptions()
+    @Published public var selectedWorkReportAnalyticsTemplateId: String = ""
+    @Published public var isLoadingWorkReportAnalytics: Bool = false
 
     // MARK: - Pagination Load-More State for Workers & CCCD
     @Published public var isLoadingMoreWorkers: Bool = false
@@ -478,6 +500,133 @@ public final class MiniBiViewModel: ObservableObject {
                 self?.taskReminders = updated
             }
         }
+
+        TaskReminderNotificationDelegate.shared.onOpenBulletinNotification = { [weak self] bulletinId in
+            Task { @MainActor [weak self] in
+                self?.openBulletinFromNotification(bulletinId: bulletinId)
+            }
+        }
+
+        reloadBulletins()
+    }
+
+    // MARK: - HRPartner Bulletin ("Bản tin HRPartner" — Local isRead + Notification Persistence + /api/bulletins Contract Gate)
+
+    private func loadPersistedReadBulletinIds() -> Set<String> {
+        let arr = UserDefaults.standard.stringArray(forKey: HrpBulletinContract.readBulletinIdsStorageKey) ?? []
+        return Set(arr.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+    }
+
+    private func savePersistedReadBulletinIds(_ ids: Set<String>) {
+        UserDefaults.standard.set(Array(ids).sorted(), forKey: HrpBulletinContract.readBulletinIdsStorageKey)
+    }
+
+    private func loadPersistedNotifiedBulletinIds() -> Set<String> {
+        let arr = UserDefaults.standard.stringArray(forKey: HrpBulletinContract.notifiedBulletinIdsStorageKey) ?? []
+        return Set(arr.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+    }
+
+    private func savePersistedNotifiedBulletinIds(_ ids: Set<String>) {
+        UserDefaults.standard.set(Array(ids).sorted(), forKey: HrpBulletinContract.notifiedBulletinIdsStorageKey)
+    }
+
+    public func reloadBulletins(notifyNewItems: Bool = false) {
+        let readIds = loadPersistedReadBulletinIds()
+        if !HrpBulletinContract.REMOTE_API_ENABLED {
+            bulletinItems = HrpBulletinItem.defaultMockupItems.map { item in
+                var copy = item
+                if readIds.contains(copy.id) {
+                    copy.isRead = true
+                }
+                return copy
+            }
+        }
+        if notifyNewItems {
+            _ = notifyUnannouncedBulletinsIfNeeded(postSystemNotification: true)
+        }
+    }
+
+    /// Detects unread bulletins that have not yet been announced on this device, marks them as announced,
+    /// and optionally posts a native iOS system notification + in-app banner.
+    @discardableResult
+    public func notifyUnannouncedBulletinsIfNeeded(postSystemNotification: Bool = false) -> [HrpBulletinItem] {
+        var notifiedIds = loadPersistedNotifiedBulletinIds()
+        let readIds = loadPersistedReadBulletinIds()
+        var newlyDiscovered: [HrpBulletinItem] = []
+
+        for item in bulletinItems where !item.isRead && !readIds.contains(item.id) && !notifiedIds.contains(item.id) {
+            notifiedIds.insert(item.id)
+            newlyDiscovered.append(item)
+        }
+
+        if !newlyDiscovered.isEmpty {
+            savePersistedNotifiedBulletinIds(notifiedIds)
+            if let latest = newlyDiscovered.first {
+                if postSystemNotification {
+                    taskReminderManager.postBulletinSystemNotification(bulletin: latest, delaySeconds: 1.0)
+                }
+                showBanner("Bản tin HRPartner mới: \(latest.title)", isError: false)
+            }
+        }
+        return newlyDiscovered
+    }
+
+    /// Opens the HRPartner Bulletin sheet and navigates directly to the specified bulletin detail (if matched).
+    public func openBulletinFromNotification(bulletinId: String) {
+        let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
+        reloadBulletins(notifyNewItems: false)
+        selectedBulletinCategory = .all
+        if !cleanId.isEmpty, bulletinItems.contains(where: { $0.id == cleanId }) {
+            markBulletinRead(cleanId)
+            selectedBulletinDetailId = cleanId
+        } else {
+            selectedBulletinDetailId = nil
+        }
+        isBulletinSheetPresented = true
+    }
+
+    /// Fires a sample iOS system notification for the latest HRPartner bulletin so UAT can verify banner + deep-link behavior.
+    public func triggerSampleBulletinNotification(bulletin: HrpBulletinItem? = nil) {
+        guard let target = bulletin ?? bulletinItems.first else { return }
+        taskReminderManager.postBulletinSystemNotification(bulletin: target, delaySeconds: 1.5)
+        showBanner("Đã gửi thông báo Bản tin: \(target.title)", isError: false)
+    }
+
+    public func markBulletinRead(_ bulletinId: String) {
+        let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+        var readIds = loadPersistedReadBulletinIds()
+        readIds.insert(cleanId)
+        savePersistedReadBulletinIds(readIds)
+
+        var notifiedIds = loadPersistedNotifiedBulletinIds()
+        if notifiedIds.insert(cleanId).inserted {
+            savePersistedNotifiedBulletinIds(notifiedIds)
+        }
+
+        for idx in bulletinItems.indices where bulletinItems[idx].id == cleanId {
+            bulletinItems[idx].isRead = true
+        }
+    }
+
+    public func markAllBulletinsRead() {
+        var readIds = loadPersistedReadBulletinIds()
+        var notifiedIds = loadPersistedNotifiedBulletinIds()
+        for idx in bulletinItems.indices {
+            readIds.insert(bulletinItems[idx].id)
+            notifiedIds.insert(bulletinItems[idx].id)
+            bulletinItems[idx].isRead = true
+        }
+        savePersistedReadBulletinIds(readIds)
+        savePersistedNotifiedBulletinIds(notifiedIds)
+    }
+
+    public func resetBulletinReadStateForTesting() {
+        UserDefaults.standard.removeObject(forKey: HrpBulletinContract.readBulletinIdsStorageKey)
+        UserDefaults.standard.removeObject(forKey: HrpBulletinContract.notifiedBulletinIdsStorageKey)
+        selectedBulletinDetailId = nil
+        isBulletinSheetPresented = false
+        bulletinItems = HrpBulletinItem.defaultMockupItems
     }
 
     // MARK: - Local Task Reminders ("Nhắc việc")
@@ -820,6 +969,10 @@ public final class MiniBiViewModel: ObservableObject {
         selectedReviewDetail = nil
         workReportTemplates = []
         workReportAnalytics = WorkReportsAnalyticsSnapshot()
+        workReportAnalyticsOptions = WorkReportAnalyticsOptions()
+        selectedWorkReportAnalyticsTemplateId = ""
+        isLoadingWorkReportAnalytics = false
+        selectedWorkReportsSubTab = .actionable
         isLoadingDashboard = false
         isLoadingWorkReports = false
         isLoadingCccdReview = false
@@ -916,7 +1069,11 @@ public final class MiniBiViewModel: ObservableObject {
                     if isNew {
                         self.notifications.insert(incomingItem, at: 0)
                         self.unreadNotificationCount = self.notifications.filter { !$0.isRead }.count
-                        if !incomingItem.isRead {
+                        let typeUpper = incomingItem.type.uppercased()
+                        let routeLower = (incomingItem.targetRoute ?? "").lowercased()
+                        if typeUpper.contains("BULLETIN") || routeLower.contains("bulletin") {
+                            self.reloadBulletins(notifyNewItems: true)
+                        } else if !incomingItem.isRead {
                             self.showBanner("Thông báo mới: \(incomingItem.title)", isError: false)
                         }
                     }
@@ -1087,6 +1244,8 @@ public final class MiniBiViewModel: ObservableObject {
             hasExplicitDestinationOverride = true
             currentDestination = .newEntry
             await loadDirectEntryBatchHistory()
+        } else if typeUpper.contains("BULLETIN") || routeLower.contains("bulletin") {
+            openBulletinFromNotification(bulletinId: item.targetEntityId ?? "")
         }
     }
 
@@ -1139,11 +1298,12 @@ public final class MiniBiViewModel: ObservableObject {
     }
 
     private var canCurrentUserManageTeamCatalog: Bool {
-        let perms = Set((currentUser?.permissions ?? []).map { $0.lowercased() })
-        return perms.contains("admin")
-            || perms.contains("team_manage")
-            || perms.contains("catalog_manage")
-            || perms.contains("user_manage")
+        let perms = Set((currentUser?.permissions ?? []).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        })
+        return perms.contains("entry_admin")
+            || perms.contains("team_master_manage")
+            || perms.contains("catalog_master_manage")
     }
 
     public func setDashboardScope(_ scope: String, reload: Bool = true) {
@@ -1227,10 +1387,11 @@ public final class MiniBiViewModel: ObservableObject {
             }
 
             let user = self.currentUser
-            let hasAllScope = user?.hasScopeKind("all") == true
-            var shouldLoadScopedFallback = !hasAllScope
+            let canLoadWorkforceDeep = user?.hasScopeKind("all") == true
+                && (user?.hasCapability("entry_admin") == true || user?.hasCapability("report_analytics_view") == true)
+            var shouldLoadScopedFallback = !canLoadWorkforceDeep
 
-            if hasAllScope {
+            if canLoadWorkforceDeep {
                 self.canViewTeamReport = true
                 self.scopedTeamReportsByKey = [:]
                 let deepRes = await self.workReportsService.fetchWorkforceDeepDashboard(
@@ -1736,10 +1897,10 @@ public final class MiniBiViewModel: ObservableObject {
         }
     }
 
-    public func loadDirectEntryAssigneeOptions(force: Bool = false) async {
+    public func loadDirectEntryAssigneeOptions(force: Bool = false, allowForDirectEdit: Bool = false) async {
         guard isAuthenticated,
               let user = currentUser,
-              user.canLoadDirectEntryCatalog,
+              (user.canLoadDirectEntryCatalog || allowForDirectEdit),
               captureSessionToken() != nil else {
             directEntryOptions = DirectEntryAssigneeOptions()
             directEntryService.clearCatalogCache()
@@ -2172,8 +2333,8 @@ public final class MiniBiViewModel: ObservableObject {
     // MARK: - Direct Edit ("Sửa trực tiếp hồ sơ NLĐ") Actions
 
     public func openDirectEdit(_ worker: WorkerItem) async {
-        guard let token = captureSessionToken(), let user = currentUser else { return }
-        guard user.hasCapability("entry_direct_edit") && worker.canDirectEdit else {
+        guard let token = captureSessionToken(), currentUser != nil else { return }
+        guard worker.canDirectEdit else {
             showBanner("Bạn không có quyền sửa trực tiếp hồ sơ này.", isError: true)
             return
         }
@@ -2190,7 +2351,7 @@ public final class MiniBiViewModel: ObservableObject {
         directEditFileStatuses = [:]
 
         if directEntryOptions.catalogProjects.isEmpty {
-            await loadDirectEntryAssigneeOptions()
+            await loadDirectEntryAssigneeOptions(allowForDirectEdit: true)
             guard !Task.isCancelled,
                   isSessionValid(token),
                   openDirectEditGeneration == expectedOpenGen,
@@ -2210,11 +2371,13 @@ public final class MiniBiViewModel: ObservableObject {
 
         switch detailRes {
         case .success(let detail, _):
-            guard detail.entryId.isEmpty || detail.entryId.caseInsensitiveCompare(targetEntryId) == .orderedSame else {
+            guard detail.entryId.isEmpty
+                || detail.entryId.caseInsensitiveCompare(targetEntryId) == .orderedSame
+                || detail.employeeCode.caseInsensitiveCompare(targetEntryId) == .orderedSame else {
                 return
             }
             directEditBaselineDetail = detail
-            if !detail.canDirectEdit || currentUser?.hasCapability("entry_direct_edit") != true {
+            if !detail.canDirectEdit {
                 directEditErrorMessage = "Tài khoản hiện tại không có quyền sửa trực tiếp hồ sơ này."
             }
         case .failure(let message, _, _, _):
@@ -2262,7 +2425,7 @@ public final class MiniBiViewModel: ObservableObject {
 
         let patch = DirectEntryService.buildDirectEditPatch(baseline: baseline, input: form)
         let requestedStaged = stagedFiles.filter { !$0.value.isEmpty }
-        let canDirectEdit = user.hasCapability("entry_direct_edit") && baseline.canDirectEdit
+        let canDirectEdit = baseline.canDirectEdit
         let canUploadDocs = user.hasCapability("document_upload")
 
         if !patch.isEmpty && !canDirectEdit {
@@ -4816,8 +4979,20 @@ public final class MiniBiViewModel: ObservableObject {
 
     // MARK: - Work Reports Actions (Including `is_overdue` & `WORK_REPORT_DEADLINE_PASSED` Contract)
 
+    public var visibleWorkReportsSubTabs: [WorkReportsSubTab] {
+        WorkReportsSubTab.visibleTabs(for: currentUser)
+    }
+
+    public func normalizeSelectedWorkReportsSubTab() {
+        let visible = visibleWorkReportsSubTabs
+        if !visible.contains(selectedWorkReportsSubTab) {
+            selectedWorkReportsSubTab = visible.first ?? .actionable
+        }
+    }
+
     public func loadWorkReportsData(force: Bool = false) async {
         guard captureSessionToken() != nil else { return }
+        normalizeSelectedWorkReportsSubTab()
         await runDeduplicatedSessionTask(key: "work_reports", force: force) { [weak self] token in
             guard let self, self.isSessionValid(token) else { return }
             self.isLoadingWorkReports = true
@@ -4827,30 +5002,100 @@ public final class MiniBiViewModel: ObservableObject {
                 }
             }
 
+            self.normalizeSelectedWorkReportsSubTab()
             await self.loadWorkReportObligations()
             guard !Task.isCancelled, self.isSessionValid(token) else { return }
 
-            async let reviewsTask = self.workReportsService.fetchPendingReviews(
-                cursor: nil,
-                pageSize: Self.leaveInboxPageSize
-            )
-            async let templatesTask = self.workReportsService.fetchSelectableTemplates()
-            async let analyticsTask = self.workReportsService.fetchAnalyticsSnapshot()
+            let canReview = self.currentUser?.canViewWorkReportReviewQueue == true
+            let canAnalytics = self.currentUser?.canViewWorkReportAnalytics == true
+
+            if !canReview {
+                self.workReportReviews = []
+                self.workReportReviewsPage = 1
+                self.workReportReviewsNextCursor = nil
+                self.workReportReviewsHasMore = false
+            }
+            if !canAnalytics {
+                self.workReportAnalyticsOptions = WorkReportAnalyticsOptions()
+                self.workReportTemplates = []
+                self.workReportAnalytics = WorkReportsAnalyticsSnapshot()
+                self.selectedWorkReportAnalyticsTemplateId = ""
+                self.isLoadingWorkReportAnalytics = false
+            }
+
+            async let reviewsTask: MiniBiApiResult<[WorkReportReviewItem]>? = canReview
+                ? self.workReportsService.fetchPendingReviews(cursor: nil, pageSize: Self.leaveInboxPageSize)
+                : nil
+            async let optionsTask: MiniBiApiResult<WorkReportAnalyticsOptions>? = canAnalytics
+                ? self.workReportsService.fetchAnalyticsOptions()
+                : nil
 
             let revRes = await reviewsTask
-            let tplRes = await templatesTask
-            let anaRes = await analyticsTask
+            let optsRes = await optionsTask
             guard !Task.isCancelled, self.isSessionValid(token) else { return }
 
-            if case .success(let revs, _) = revRes {
+            if let revRes, case .success(let revs, _) = revRes {
                 self.workReportReviews = revs
                 self.workReportReviewsPage = 1
                 self.workReportReviewsNextCursor = self.workReportsService.lastPendingReviewsNextCursor
                 self.workReportReviewsHasMore = self.workReportsService.lastPendingReviewsHasMore
                     && !(self.workReportReviewsNextCursor ?? "").isEmpty
             }
-            if case .success(let tpls, _) = tplRes { self.workReportTemplates = tpls }
-            if case .success(let ana, _) = anaRes { self.workReportAnalytics = ana }
+
+            if let optsRes, case .success(let opts, _) = optsRes {
+                self.workReportAnalyticsOptions = opts
+                self.workReportTemplates = opts.templates
+                if opts.templates.isEmpty {
+                    self.selectedWorkReportAnalyticsTemplateId = ""
+                    self.workReportAnalytics = WorkReportsAnalyticsSnapshot()
+                } else {
+                    let currentSelected = self.selectedWorkReportAnalyticsTemplateId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let targetTemplateId: String
+                    if !currentSelected.isEmpty,
+                       opts.templates.contains(where: { $0.templateId == currentSelected }) {
+                        targetTemplateId = currentSelected
+                    } else {
+                        targetTemplateId = opts.templates.first?.templateId ?? ""
+                    }
+                    self.selectedWorkReportAnalyticsTemplateId = targetTemplateId
+                    if !targetTemplateId.isEmpty {
+                        self.isLoadingWorkReportAnalytics = true
+                        let anaRes = await self.workReportsService.fetchAnalyticsSnapshot(templateId: targetTemplateId)
+                        guard !Task.isCancelled, self.isSessionValid(token) else { return }
+                        self.isLoadingWorkReportAnalytics = false
+                        if case .success(let ana, _) = anaRes {
+                            self.workReportAnalytics = ana
+                        }
+                    } else {
+                        self.workReportAnalytics = WorkReportsAnalyticsSnapshot()
+                    }
+                }
+            }
+        }
+    }
+
+    public func selectWorkReportAnalyticsTemplate(_ templateId: String) async {
+        let cleanId = templateId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let token = captureSessionToken(),
+              currentUser?.canViewWorkReportAnalytics == true,
+              !cleanId.isEmpty else {
+            return
+        }
+        selectedWorkReportAnalyticsTemplateId = cleanId
+        isLoadingWorkReportAnalytics = true
+        defer {
+            if isSessionValid(token), selectedWorkReportAnalyticsTemplateId == cleanId {
+                isLoadingWorkReportAnalytics = false
+            }
+        }
+        let res = await workReportsService.fetchAnalyticsSnapshot(templateId: cleanId)
+        guard !Task.isCancelled,
+              isSessionValid(token),
+              selectedWorkReportAnalyticsTemplateId == cleanId else {
+            return
+        }
+        if case .success(let ana, _) = res {
+            self.workReportAnalytics = ana
         }
     }
 

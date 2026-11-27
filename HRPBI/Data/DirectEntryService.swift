@@ -1050,7 +1050,7 @@ public final class DirectEntryService: @unchecked Sendable {
             ?? (root["data"] as? [String: Any])
             ?? root
 
-        let entryId = entryObj.optString("entry_id", "id")
+        let entryId = entryObj.optString("entry_id", "worker_entry_id", "id")
         let submissionId = entryObj.optString("submission_id")
         let version = max(1, entryObj.optInt("version", "entry_version", defaultValue: 1))
         let catalog = DirectEntryService.shared.lastLoadedCatalog
@@ -1065,7 +1065,10 @@ public final class DirectEntryService: @unchecked Sendable {
             }
             return rawProjectDisplay.isEmpty ? projectId : rawProjectDisplay
         }()
-        let firstWorkDate = entryObj.optString("first_work_date", "ngay_vao_lam")
+        let rawFirstWorkDate = entryObj.optString("first_work_date", "ngay_vao_lam")
+        let firstWorkDate = (rawFirstWorkDate.count >= 10 && rawFirstWorkDate.contains("-"))
+            ? String(rawFirstWorkDate.prefix(10))
+            : rawFirstWorkDate
         let employeeCode = entryObj.optString("employee_code", "ma_nld")
         let recruiterObj = entryObj["recruiter"] as? [String: Any]
         let recruiterId = recruiterObj?.optString("recruiter_id", "id") ?? entryObj.optString("recruiter_id")
@@ -1095,11 +1098,12 @@ public final class DirectEntryService: @unchecked Sendable {
             return rawLaborTypeDisplay
         }()
         let allowedObj = entryObj["allowed_actions"] as? [String: Any]
-        let canDirectEdit = allowedObj?.optBool("direct_edit", defaultValue: true)
+        let canDirectEdit = allowedObj?.optBool("direct_edit", "privileged_edit", defaultValue: true)
             ?? entryObj.optBool("can_direct_edit", defaultValue: true)
 
         let wdObj = (entryObj["worker_details"] as? [String: Any])
             ?? (entryObj["worker"] as? [String: Any])
+            ?? (entryObj["pii"] as? [String: Any])
             ?? [:]
         let displayName = wdObj.optString("display_name")
             .ifEmpty(entryObj.optString("display_name", "ho_ten", "full_name"))
@@ -1112,7 +1116,16 @@ public final class DirectEntryService: @unchecked Sendable {
             if let sub = raw as? [String: Any] {
                 let st = sub.optString("state", defaultValue: "omitted")
                 let val = sub.optNullableString("value")
-                return (st, st == "provided" ? val : nil)
+                if st == "provided" {
+                    return ("provided", val)
+                }
+                if st != "intentionally_blank" && st != "omitted", let val, !val.isEmpty {
+                    return ("provided", val)
+                }
+                if sub["state"] == nil, let val, !val.isEmpty {
+                    return ("provided", val)
+                }
+                return (st, nil)
             }
             if let s = raw as? String {
                 let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1151,8 +1164,12 @@ public final class DirectEntryService: @unchecked Sendable {
 
         let empObj = entryObj["employment_status"] as? [String: Any]
         let employmentStatus = (empObj?.optString("status") ?? entryObj.optString("employment_status", defaultValue: "ON")).uppercased()
-        let employmentEffectiveDate = empObj?.optString("effective_date")
-            ?? entryObj.optString("employment_effective_date", defaultValue: firstWorkDate)
+        let rawEffectiveDate = (empObj?.optString("effective_date") ?? "").ifEmpty(
+            entryObj.optString("employment_effective_date", defaultValue: firstWorkDate)
+        ).ifEmpty(firstWorkDate)
+        let employmentEffectiveDate = (rawEffectiveDate.count >= 10 && rawEffectiveDate.contains("-"))
+            ? String(rawEffectiveDate.prefix(10))
+            : rawEffectiveDate
         let employmentStatusVersion = max(1, empObj?.optInt("version", defaultValue: 1) ?? 1)
         let employmentLeaveReason = empObj?.optNullableString("leave_reason")
             ?? entryObj.optNullableString("employment_leave_reason", "leave_reason")
@@ -1354,8 +1371,9 @@ public final class DirectEntryService: @unchecked Sendable {
             if isoEff.isEmpty {
                 errors["employment_effective_date"] = "Ngày hiệu lực không hợp lệ. Hãy nhập đúng DD/MM/YYYY (ví dụ: 30/10/2026)."
             } else {
+                let baseEffectiveDate = baseline.employmentEffectiveDate.isEmpty ? baseline.firstWorkDate : baseline.employmentEffectiveDate
                 let statusChanged = cleanStatus != baseline.employmentStatus.uppercased() ||
-                    isoEff != baseline.employmentEffectiveDate ||
+                    isoEff != baseEffectiveDate ||
                     (cleanStatus == "OFF" && input.leaveReason.trimmingCharacters(in: .whitespacesAndNewlines) != (baseline.employmentLeaveReason ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
                 if statusChanged && cleanStatus == "OFF" && input.leaveReason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     errors["employment_leave_reason"] = "Khi chọn trạng thái Đã nghỉ, bắt buộc phải nhập Lý do nghỉ việc."
@@ -1450,7 +1468,13 @@ public final class DirectEntryService: @unchecked Sendable {
             isDate: Bool
         ) -> (dict: [String: Any]?, changed: Bool) {
             let baseState = baseline.workerDetailsStates[fieldKey] ?? ((baselineValue?.isEmpty == false) ? "provided" : "omitted")
-            let baseVal = baselineValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawBaseVal = baselineValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let baseVal: String = {
+                if isDate && rawBaseVal.count >= 10 && rawBaseVal.contains("-") {
+                    return String(rawBaseVal.prefix(10))
+                }
+                return rawBaseVal
+            }()
             let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
             let normalizedVal: String = {
                 if trimmed.isEmpty { return "" }
@@ -1473,14 +1497,16 @@ public final class DirectEntryService: @unchecked Sendable {
             return (["state": "provided", "value": normalizedVal], true)
         }
 
-        let normalizedGender: String = {
-            let g = input.gender.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        func normalizeGenderToken(_ raw: String?) -> String {
+            let g = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
             if g == "NAM" || g == "MALE" { return "MALE" }
             if g == "NỮ" || g == "NU" || g == "FEMALE" { return "FEMALE" }
             return ""
-        }()
+        }
+        let normalizedGender = normalizeGenderToken(input.gender)
+        let normalizedBaseGender = normalizeGenderToken(baseline.gender)
 
-        let genderRes = resolveOptionalField(fieldKey: "gender", baselineValue: baseline.gender, rawInput: normalizedGender, isDate: false)
+        let genderRes = resolveOptionalField(fieldKey: "gender", baselineValue: normalizedBaseGender.isEmpty ? baseline.gender : normalizedBaseGender, rawInput: normalizedGender, isDate: false)
         let dobRes = resolveOptionalField(fieldKey: "date_of_birth", baselineValue: baseline.dateOfBirth, rawInput: input.dateOfBirthUi, isDate: true)
         let nidRes = resolveOptionalField(fieldKey: "national_id", baselineValue: baseline.nationalId, rawInput: input.nationalId, isDate: false)
         let issuedAtRes = resolveOptionalField(fieldKey: "national_id_issued_at", baselineValue: baseline.nationalIdIssuedAt, rawInput: input.nationalIdIssuedAtUi, isDate: true)
@@ -1564,9 +1590,10 @@ public final class DirectEntryService: @unchecked Sendable {
             let cleanStatus = input.statusCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
             let isoEff = DirectEntryContract.uiDateToIsoDate(input.statusEffectiveDateUi)
             let cleanLeaveReason = input.leaveReason.trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseEffectiveDate = baseline.employmentEffectiveDate.isEmpty ? baseline.firstWorkDate : baseline.employmentEffectiveDate
             let statusChanged = !cleanStatus.isEmpty && (
                 cleanStatus != baseline.employmentStatus.uppercased() ||
-                (!isoEff.isEmpty && isoEff != baseline.employmentEffectiveDate) ||
+                (!isoEff.isEmpty && isoEff != baseEffectiveDate) ||
                 (cleanStatus == "OFF" && cleanLeaveReason != (baseline.employmentLeaveReason ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
             )
             if statusChanged {
