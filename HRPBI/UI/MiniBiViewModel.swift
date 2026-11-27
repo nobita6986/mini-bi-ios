@@ -1847,13 +1847,26 @@ public final class MiniBiViewModel: ObservableObject {
     }
 
     @discardableResult
-    public func applyScannedCccdQr(rowId: String, rawQr: String) -> Bool {
-        guard let parsed = CccdQrDecoder.parse(rawQr),
-              let idx = newWorkerDraftRows.firstIndex(where: { $0.rowId == rowId }) else {
+    public func applyScannedCccdQr(rowId: String, rawQr: String, onlyEmptyFields: Bool = false) -> Bool {
+        guard let parsed = CccdQrDecoder.parse(rawQr) else {
             return false
         }
-        newWorkerDraftRows[idx] = CccdQrDecoder.applyToDraft(newWorkerDraftRows[idx], qrData: parsed)
-        showBanner("Đã điền tự động CCCD: \(parsed.soCccd) - \(parsed.hoTen)")
+        return applyDecodedCccdData(rowId: rowId, data: parsed, onlyEmptyFields: onlyEmptyFields)
+    }
+
+    @discardableResult
+    public func applyDecodedCccdData(rowId: String, data: CccdQrData, onlyEmptyFields: Bool = false) -> Bool {
+        guard let idx = newWorkerDraftRows.firstIndex(where: { $0.rowId == rowId }) else {
+            return false
+        }
+        let before = newWorkerDraftRows[idx]
+        let updated = CccdQrDecoder.applyToDraft(before, qrData: data, onlyEmptyFields: onlyEmptyFields)
+        guard updated != before else {
+            return false
+        }
+        newWorkerDraftRows[idx] = updated
+        let summaryName = updated.hoTen.isEmpty ? data.soCccd : "\(data.soCccd) - \(updated.hoTen)"
+        showBanner("Đã điền tự động CCCD: \(summaryName)")
         return true
     }
 

@@ -210,8 +210,11 @@ public struct DirectEntryNewWorkersScreen: View {
             set: { if !$0 { activeQrScannerRowId = nil } }
         )) {
             if let rowId = activeQrScannerRowId {
-                CccdQrScannerSheet { rawQr, _ in
-                    _ = viewModel.applyScannedCccdQr(rowId: rowId, rawQr: rawQr)
+                CccdQrScannerSheet { rawQr, decoded in
+                    let applied = viewModel.applyScannedCccdQr(rowId: rowId, rawQr: rawQr)
+                    if !applied {
+                        _ = viewModel.applyDecodedCccdData(rowId: rowId, data: decoded)
+                    }
                     activeQrScannerRowId = nil
                 }
             }
@@ -728,9 +731,7 @@ struct NewWorkerDraftRowCard: View {
                                 docType: DirectEntryContract.docTypeCccdFront,
                                 attachment: att
                             )
-                            if draft.soCccd.isEmpty, let qrRaw = CccdQrScannerSheet.detectQrFromImageData(data) {
-                                _ = viewModel.applyScannedCccdQr(rowId: draft.rowId, rawQr: qrRaw)
-                            }
+                            autoFillCccdFromAttachedImage(rowId: draft.rowId, imageData: data)
                         }
                         frontPhotoPickerItem = nil
                     }
@@ -808,6 +809,7 @@ struct NewWorkerDraftRowCard: View {
                                 docType: DirectEntryContract.docTypeCccdBack,
                                 attachment: att
                             )
+                            autoFillCccdFromAttachedImage(rowId: draft.rowId, imageData: data)
                         }
                         backPhotoPickerItem = nil
                     }
@@ -1024,9 +1026,7 @@ struct NewWorkerDraftRowCard: View {
                         docType: DirectEntryContract.docTypeCccdFront,
                         attachment: att
                     )
-                    if draft.soCccd.isEmpty, let qrRaw = CccdQrScannerSheet.detectQrFromImageData(capturedData) {
-                        _ = viewModel.applyScannedCccdQr(rowId: draft.rowId, rawQr: qrRaw)
-                    }
+                    autoFillCccdFromAttachedImage(rowId: draft.rowId, imageData: capturedData)
                 case .cccdBack:
                     let att = LocalAttachmentItem(
                         fileName: "chup-cccd-sau-\(ts).jpg",
@@ -1038,8 +1038,28 @@ struct NewWorkerDraftRowCard: View {
                         docType: DirectEntryContract.docTypeCccdBack,
                         attachment: att
                     )
+                    autoFillCccdFromAttachedImage(rowId: draft.rowId, imageData: capturedData)
                 }
             }
+        }
+    }
+
+    private func autoFillCccdFromAttachedImage(rowId: String, imageData: Data) {
+        guard let current = viewModel.newWorkerDraftRows.first(where: { $0.rowId == rowId }) else { return }
+        let needsScan = current.soCccd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || current.hoTen.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !current.hoTen.unicodeScalars.contains(where: { $0.value > 127 })
+            || current.ngaySinh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || current.gioiTinh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || current.queQuan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || current.ngayCap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard needsScan else { return }
+        Task {
+            let decoded = await Task.detached(priority: .userInitiated) {
+                CccdQrScannerSheet.detectCccdFromImageData(imageData)
+            }.value
+            guard let decoded else { return }
+            _ = viewModel.applyDecodedCccdData(rowId: rowId, data: decoded, onlyEmptyFields: true)
         }
     }
 

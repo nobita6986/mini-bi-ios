@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import CoreImage
 import PDFKit
 @testable import HRPBI
 
@@ -6656,5 +6657,139 @@ final class HRPBTests: XCTestCase {
             ),
             "Trưởng bộ phận (Khối Vận Hành)"
         )
+    }
+
+    // MARK: - v1.1.2 CCCD 2021 QR Cyan Suppression + MRZ ICAO 9303 + Vietnamese OCR Tests
+
+    func testCccd2021MrzAndVietnameseOcrAndChecksumValidation() throws {
+        // 1. Real-world 2021 CCCD TD1 MRZ + combined Front/Back Vietnamese OCR lines
+        let combinedLines = [
+            "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM",
+            "Số / No.: 026198004355",
+            "Họ và tên / Full name:",
+            "ĐỖ THỊ LAN ANH",
+            "Ngày sinh / Date of birth: 18/12/1998",
+            "Giới tính / Sex: Nữ   Quốc tịch / Nationality: Việt Nam",
+            "Quê quán / Place of origin: Trung Kiên, Yên Lạc, Vĩnh Phúc",
+            "Nơi thường trú / Place of residence:",
+            "Xóm Chùa, Trung Kiên",
+            "Yên Lạc, Vĩnh Phúc",
+            "Có giá trị đến / Date of expiry: 18/12/2038",
+            "Ngày, tháng, năm / Date, month, year",
+            "04/07/2023",
+            "IDVNM1980043557026198004355<<9",
+            "9812183F3812181VNM<<<<<<<<<<<8",
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        let parsedCombined = try XCTUnwrap(CccdQrDecoder.parseFromRecognizedTextLines(combinedLines))
+        XCTAssertEqual(parsedCombined.soCccd, "026198004355")
+        XCTAssertEqual(parsedCombined.hoTen, "ĐỖ THỊ LAN ANH")
+        XCTAssertEqual(parsedCombined.ngaySinh, "18/12/1998")
+        XCTAssertEqual(parsedCombined.gioiTinh, "Nữ")
+        XCTAssertEqual(parsedCombined.queQuan, "Xóm Chùa, Trung Kiên, Yên Lạc, Vĩnh Phúc")
+        XCTAssertEqual(parsedCombined.ngayCap, "04/07/2023")
+
+        // 2. MRZ-only back-side lines fall back to unaccented MRZ name + issue date
+        let backOnlyLines = [
+            "04/07/2023",
+            "Ngày, tháng, năm / Date, month, year",
+            "IDVNM1980043557026198004355<<9",
+            "9812183F3812181VNM<<<<<<<<<<<8",
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        let parsedBack = try XCTUnwrap(CccdQrDecoder.parseFromRecognizedTextLines(backOnlyLines))
+        XCTAssertEqual(parsedBack.soCccd, "026198004355")
+        XCTAssertEqual(parsedBack.hoTen, "DO THI LAN ANH")
+        XCTAssertEqual(parsedBack.ngaySinh, "18/12/1998")
+        XCTAssertEqual(parsedBack.gioiTinh, "Nữ")
+        XCTAssertEqual(parsedBack.ngayCap, "04/07/2023")
+
+        // 3. Modulo-10 OCR digit-typo sanitization (O->0, I/L->1, B->8, S->5) passes when checksum matches
+        let typoMrzLines = [
+            "IDVNM198OO43557O26I980O4355<<9",
+            "98L2I83F3812181VNM<<<<<<<<<<<8",
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        let parsedTypo = try XCTUnwrap(CccdQrDecoder.parseMrzFromLines(typoMrzLines))
+        XCTAssertEqual(parsedTypo.soCccd, "026198004355")
+        XCTAssertEqual(parsedTypo.ngaySinh, "18/12/1998")
+        XCTAssertEqual(parsedTypo.gioiTinh, "Nữ")
+
+        // 4. Corrupted check digit in Line 1 must be rejected cleanly (fail-closed)
+        let badLine1Checksum = [
+            "IDVNM1980043550026198004355<<9", // check digit 7 corrupted to 0
+            "9812183F3812181VNM<<<<<<<<<<<8",
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        XCTAssertNil(CccdQrDecoder.parseMrzFromLines(badLine1Checksum))
+
+        // Corrupted check digit in Line 2 DOB must reject DOB instead of filling wrong birth date
+        let badLine2DobChecksum = [
+            "IDVNM1980043557026198004355<<9",
+            "9812180F3812181VNM<<<<<<<<<<<8", // check digit 3 corrupted to 0
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        let parsedWithBadDob = try XCTUnwrap(CccdQrDecoder.parseMrzFromLines(badLine2DobChecksum))
+        XCTAssertEqual(parsedWithBadDob.soCccd, "026198004355")
+        XCTAssertEqual(parsedWithBadDob.ngaySinh, "")
+        XCTAssertEqual(parsedWithBadDob.gioiTinh, "Nữ") // From 4th digit '1' of CCCD
+
+        // 5. Smart fill (onlyEmptyFields: true): upgrades unaccented MRZ name -> Vietnamese diacritic name without clobbering manual fields
+        var draft = NewWorkerEntryDraft()
+        draft = CccdQrDecoder.applyToDraft(draft, qrData: parsedBack, onlyEmptyFields: true)
+        XCTAssertEqual(draft.hoTen, "DO THI LAN ANH")
+        draft.sdt = "0912345678"
+        let frontOcrOnly = try XCTUnwrap(CccdQrDecoder.parseFromRecognizedTextLines([
+            "Số / No.: 026198004355",
+            "Họ và tên / Full name: ĐỖ THỊ LAN ANH",
+            "Nơi thường trú / Place of residence:",
+            "Xóm Chùa, Trung Kiên",
+            "Yên Lạc, Vĩnh Phúc"
+        ]))
+        draft = CccdQrDecoder.applyToDraft(draft, qrData: frontOcrOnly, onlyEmptyFields: true)
+        XCTAssertEqual(draft.hoTen, "ĐỖ THỊ LAN ANH")
+        XCTAssertEqual(draft.queQuan, "Xóm Chùa, Trung Kiên, Yên Lạc, Vĩnh Phúc")
+        XCTAssertEqual(draft.ngayCap, "04/07/2023")
+        XCTAssertEqual(draft.sdt, "0912345678")
+    }
+
+    func testCccd2021QrDetectionWithTealBackgroundAndVerticalRotation() throws {
+        let payload = "026198004355||Đỗ Thị Lan Anh|18121998|Nữ|Xóm Chùa, Trung Kiên, Yên Lạc, Vĩnh Phúc|04072023"
+        let filter = try XCTUnwrap(CIFilter(name: "CIQRCodeGenerator"))
+        filter.setValue(Data(payload.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        let qrCi = try XCTUnwrap(filter.outputImage)
+            .transformed(by: CGAffineTransform(scaleX: 4, y: 4))
+        let ciCtx = CIContext()
+        let qrCg = try XCTUnwrap(ciCtx.createCGImage(qrCi, from: qrCi.extent))
+
+        // Render a vertical card photo with teal/cyan 2021 CCCD background and a small QR placed in bottom-right corner
+        let canvasSize = CGSize(width: 900, height: 1400)
+        let renderer = UIGraphicsImageRenderer(size: canvasSize)
+        let cardImg = renderer.image { ctx in
+            UIColor(red: 0.72, green: 0.90, blue: 0.89, alpha: 1.0).setFill()
+            ctx.fill(CGRect(origin: .zero, size: canvasSize))
+
+            // Draw simulated teal security wave lines over the card
+            UIColor(red: 0.35, green: 0.72, blue: 0.71, alpha: 0.45).setStroke()
+            let wavePath = UIBezierPath()
+            wavePath.lineWidth = 2
+            for y in stride(from: 40, through: 1360, by: 28) {
+                wavePath.move(to: CGPoint(x: 0, y: y))
+                wavePath.addLine(to: CGPoint(x: 900, y: y + 18))
+            }
+            wavePath.stroke()
+
+            // Place QR in bottom-right corner (rotated / vertical card layout)
+            let qrRect = CGRect(x: 680, y: 1160, width: 170, height: 170)
+            UIImage(cgImage: qrCg).draw(in: qrRect)
+        }
+        let jpegData = try XCTUnwrap(cardImg.jpegData(compressionQuality: 0.75))
+
+        let detected = CccdQrScannerSheet.detectQrFromImageData(jpegData)
+        XCTAssertEqual(detected, payload)
+        let parsed = try XCTUnwrap(CccdQrDecoder.parse(detected))
+        XCTAssertEqual(parsed.soCccd, "026198004355")
+        XCTAssertEqual(parsed.hoTen, "Đỗ Thị Lan Anh")
     }
 }
