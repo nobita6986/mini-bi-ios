@@ -6765,13 +6765,20 @@ final class HRPBTests: XCTestCase {
 
         // Render a vertical card photo with teal/cyan 2021 CCCD background and a small QR placed in bottom-right corner
         let canvasSize = CGSize(width: 900, height: 1400)
-        let renderer = UIGraphicsImageRenderer(size: canvasSize)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: canvasSize, format: format)
         let cardImg = renderer.image { ctx in
             UIColor(red: 0.72, green: 0.90, blue: 0.89, alpha: 1.0).setFill()
             ctx.fill(CGRect(origin: .zero, size: canvasSize))
 
+            // Place crisp small QR in bottom-right corner (vertical card layout)
+            ctx.cgContext.interpolationQuality = .none
+            let qrRect = CGRect(x: 680, y: 1160, width: 170, height: 170)
+            UIImage(cgImage: qrCg).draw(in: qrRect)
+
             // Draw simulated teal security wave lines over the card
-            UIColor(red: 0.35, green: 0.72, blue: 0.71, alpha: 0.45).setStroke()
+            UIColor(red: 0.35, green: 0.72, blue: 0.71, alpha: 0.35).setStroke()
             let wavePath = UIBezierPath()
             wavePath.lineWidth = 2
             for y in stride(from: 40, through: 1360, by: 28) {
@@ -6779,10 +6786,6 @@ final class HRPBTests: XCTestCase {
                 wavePath.addLine(to: CGPoint(x: 900, y: y + 18))
             }
             wavePath.stroke()
-
-            // Place QR in bottom-right corner (rotated / vertical card layout)
-            let qrRect = CGRect(x: 680, y: 1160, width: 170, height: 170)
-            UIImage(cgImage: qrCg).draw(in: qrRect)
         }
         let jpegData = try XCTUnwrap(cardImg.jpegData(compressionQuality: 0.75))
 

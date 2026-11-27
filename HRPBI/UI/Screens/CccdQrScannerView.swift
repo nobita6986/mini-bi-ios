@@ -20,6 +20,11 @@ public struct CccdQrScannerSheet: View {
     @State private var selectedPhotoItem: PhotosPickerItem?
 
     private static let sharedCiContext = CIContext(options: [.useSoftwareRenderer: false])
+    private static let qrCiDetector: CIDetector? = CIDetector(
+        ofType: CIDetectorTypeQRCode,
+        context: sharedCiContext,
+        options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]
+    )
 
     public init(onDecoded: @escaping (String, CccdQrData) -> Void) {
         self.onDecoded = onDecoded
@@ -284,7 +289,21 @@ public struct CccdQrScannerSheet: View {
         request.symbologies = [.qr]
         let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
         try? handler.perform([request])
-        return detectedPayload
+        if let detectedPayload {
+            return detectedPayload
+        }
+
+        // CoreImage CIDetector fallback (works without ANE/E5RT and excels on high-contrast crops)
+        if let detector = qrCiDetector {
+            let ciImg = orientation == .up ? CIImage(cgImage: cgImage) : CIImage(cgImage: cgImage).oriented(orientation)
+            let features = detector.features(in: ciImg)
+            for case let qrFeature as CIQRCodeFeature in features {
+                if let payload = qrFeature.messageString, CccdQrDecoder.parse(payload) != nil {
+                    return payload
+                }
+            }
+        }
+        return nil
     }
 
     private static func recognizeTextLines(
