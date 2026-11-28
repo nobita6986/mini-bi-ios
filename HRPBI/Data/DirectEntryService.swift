@@ -277,6 +277,140 @@ public final class DirectEntryService: @unchecked Sendable {
 
     // MARK: - 2. Direct Entry ("Cấp mới") Options, Duplicate Check, Batch Submit & Document Upload
 
+    public static func parseAssigneeOptions(_ root: [String: Any]) -> DirectEntryAssigneeOptions {
+        let dataObj = (root["catalog"] as? [String: Any])
+            ?? (root["data"] as? [String: Any])
+            ?? root
+
+        var catalogProjects: [DirectEntryCatalogProject] = []
+        if let projObjs = dataObj["projects"] as? [[String: Any]] {
+            for p in projObjs {
+                if p.keys.contains("is_active") && !p.optBool("is_active", defaultValue: true) { continue }
+                let pid = p.optString("project_id", "id", "code")
+                let name = p.optString("display_name", "name", "project_display", defaultValue: pid)
+                if !pid.isEmpty && !name.isEmpty {
+                    catalogProjects.append(DirectEntryCatalogProject(projectId: pid, displayName: name))
+                }
+            }
+        }
+        catalogProjects.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+
+        var catalogRecruiters: [DirectEntryCatalogRecruiter] = []
+        if let recObjs = dataObj["recruiters"] as? [[String: Any]] {
+            for r in recObjs {
+                if r.keys.contains("is_active") && !r.optBool("is_active", defaultValue: true) { continue }
+                let rid = r.optString("recruiter_id", "id", "code")
+                let name = r.optString("display_name", "name", "recruiter_display", defaultValue: rid)
+                let pCode = r.optString("personnel_code", "employee_code", "code")
+                let pType = r.optString("provider_type", defaultValue: "hrp").lowercased() == "vendor" ? "vendor" : "hrp"
+                let vendorId = r.optNullableString("vendor_id")
+                let teamId = r.optNullableString("team_id")
+                let teamDisplay = r.optNullableString("team_display_name", "team_name")
+                if !rid.isEmpty && !name.isEmpty {
+                    catalogRecruiters.append(
+                        DirectEntryCatalogRecruiter(
+                            recruiterId: rid,
+                            displayName: name,
+                            personnelCode: pCode,
+                            providerType: pType,
+                            vendorId: vendorId,
+                            teamId: teamId,
+                            teamDisplayName: teamDisplay
+                        )
+                    )
+                }
+            }
+        }
+        catalogRecruiters.sort { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+
+        let rawCollaborators = dataObj["collaborators"]
+        let supportsCollaborators = rawCollaborators != nil && !(rawCollaborators is NSNull)
+        var catalogCollaborators: [DirectEntryCatalogCollaborator] = []
+        if let collabObjs = rawCollaborators as? [[String: Any]] {
+            var seenIds = Set<String>()
+            for c in collabObjs {
+                let cid = c.optString("collaborator_id", "id", "code").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard DirectEntryCatalogCollaborator.isValidId(cid), !seenIds.contains(cid) else { continue }
+                seenIds.insert(cid)
+                let name = c.optString("display_name", "name", defaultValue: cid).trimmingCharacters(in: .whitespacesAndNewlines)
+                let isActive = c.optBool("active", "is_active", defaultValue: true)
+                catalogCollaborators.append(
+                    DirectEntryCatalogCollaborator(
+                        collaboratorId: cid,
+                        displayName: name.isEmpty ? cid : name,
+                        active: isActive
+                    )
+                )
+            }
+        }
+        catalogCollaborators.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+
+        var catalogBanks: [DirectEntryCatalogBank] = []
+        if let bankObjs = dataObj["banks"] as? [[String: Any]] {
+            for b in bankObjs {
+                let bid = b.optString("bank_id", "id", "code")
+                let name = b.optString("display_name", "name", "bank_name", defaultValue: bid)
+                if !bid.isEmpty && !name.isEmpty {
+                    catalogBanks.append(DirectEntryCatalogBank(bankId: bid, displayName: name))
+                }
+            }
+        }
+        catalogBanks.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+
+        var catalogLaborTypes: [DirectEntryCatalogLaborType] = []
+        if let ltObjs = dataObj["labor_types"] as? [[String: Any]] {
+            for lt in ltObjs {
+                if lt.keys.contains("is_active") && !lt.optBool("is_active", defaultValue: true) { continue }
+                let key = lt.optString("labor_type_key", "key", "code")
+                let name = lt.optString("display_name", "name", "label", defaultValue: key)
+                let order = lt.optInt("sort_order", defaultValue: 100)
+                if !key.isEmpty && !name.isEmpty {
+                    catalogLaborTypes.append(DirectEntryCatalogLaborType(laborTypeKey: key, displayName: name, sortOrder: order))
+                }
+            }
+        }
+        catalogLaborTypes.sort { $0.sortOrder < $1.sortOrder }
+        if catalogLaborTypes.isEmpty {
+            catalogLaborTypes = DirectEntryAssigneeOptions.fallbackLaborTypes
+        }
+
+        var projects = catalogProjects.map(\.displayName)
+        if projects.isEmpty {
+            projects = dataObj.optStringArray("projects", "du_an")
+        }
+
+        var recruiters = catalogRecruiters.map(\.label)
+        if recruiters.isEmpty {
+            recruiters = dataObj.optStringArray("recruiters", "nguoi_tuyen")
+        }
+
+        var banks = catalogBanks.map(\.displayName)
+        if banks.isEmpty {
+            banks = dataObj.optStringArray("banks", "ngan_hang")
+        }
+
+        var managers = dataObj.optStringArray("managers", "quan_ly")
+        if managers.isEmpty, let mgrObjs = dataObj["managers"] as? [[String: Any]] {
+            managers = mgrObjs.compactMap { m in
+                let label = m.optString("display_name", "name", "manager_display", "manager_id")
+                return label.isEmpty ? nil : label
+            }
+        }
+
+        return DirectEntryAssigneeOptions(
+            projects: projects,
+            managers: managers,
+            recruiters: recruiters,
+            banks: banks,
+            catalogProjects: catalogProjects,
+            catalogRecruiters: catalogRecruiters,
+            catalogCollaborators: catalogCollaborators,
+            supportsCollaborators: supportsCollaborators,
+            catalogBanks: catalogBanks,
+            catalogLaborTypes: catalogLaborTypes
+        )
+    }
+
     public func fetchAssigneeOptions() async -> MiniBiApiResult<DirectEntryAssigneeOptions> {
         let effectiveDate = LeaveContract.todayVietnamIsoDate()
         let response = await httpClient.request(
@@ -285,113 +419,7 @@ public final class DirectEntryService: @unchecked Sendable {
             queryItems: [URLQueryItem(name: "effective_date", value: effectiveDate)]
         )
         if response.isSuccess, let root = response.jsonObject {
-            let dataObj = (root["catalog"] as? [String: Any])
-                ?? (root["data"] as? [String: Any])
-                ?? root
-
-            var catalogProjects: [DirectEntryCatalogProject] = []
-            if let projObjs = dataObj["projects"] as? [[String: Any]] {
-                for p in projObjs {
-                    if p.keys.contains("is_active") && !p.optBool("is_active", defaultValue: true) { continue }
-                    let pid = p.optString("project_id", "id", "code")
-                    let name = p.optString("display_name", "name", "project_display", defaultValue: pid)
-                    if !pid.isEmpty && !name.isEmpty {
-                        catalogProjects.append(DirectEntryCatalogProject(projectId: pid, displayName: name))
-                    }
-                }
-            }
-            catalogProjects.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-
-            var catalogRecruiters: [DirectEntryCatalogRecruiter] = []
-            if let recObjs = dataObj["recruiters"] as? [[String: Any]] {
-                for r in recObjs {
-                    if r.keys.contains("is_active") && !r.optBool("is_active", defaultValue: true) { continue }
-                    let rid = r.optString("recruiter_id", "id", "code")
-                    let name = r.optString("display_name", "name", "recruiter_display", defaultValue: rid)
-                    let pCode = r.optString("personnel_code", "employee_code", "code")
-                    let pType = r.optString("provider_type", defaultValue: "hrp").lowercased() == "vendor" ? "vendor" : "hrp"
-                    let vendorId = r.optNullableString("vendor_id")
-                    let teamId = r.optNullableString("team_id")
-                    let teamDisplay = r.optNullableString("team_display_name", "team_name")
-                    if !rid.isEmpty && !name.isEmpty {
-                        catalogRecruiters.append(
-                            DirectEntryCatalogRecruiter(
-                                recruiterId: rid,
-                                displayName: name,
-                                personnelCode: pCode,
-                                providerType: pType,
-                                vendorId: vendorId,
-                                teamId: teamId,
-                                teamDisplayName: teamDisplay
-                            )
-                        )
-                    }
-                }
-            }
-            catalogRecruiters.sort { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
-
-            var catalogBanks: [DirectEntryCatalogBank] = []
-            if let bankObjs = dataObj["banks"] as? [[String: Any]] {
-                for b in bankObjs {
-                    let bid = b.optString("bank_id", "id", "code")
-                    let name = b.optString("display_name", "name", "bank_name", defaultValue: bid)
-                    if !bid.isEmpty && !name.isEmpty {
-                        catalogBanks.append(DirectEntryCatalogBank(bankId: bid, displayName: name))
-                    }
-                }
-            }
-            catalogBanks.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-
-            var catalogLaborTypes: [DirectEntryCatalogLaborType] = []
-            if let ltObjs = dataObj["labor_types"] as? [[String: Any]] {
-                for lt in ltObjs {
-                    if lt.keys.contains("is_active") && !lt.optBool("is_active", defaultValue: true) { continue }
-                    let key = lt.optString("labor_type_key", "key", "code")
-                    let name = lt.optString("display_name", "name", "label", defaultValue: key)
-                    let order = lt.optInt("sort_order", defaultValue: 100)
-                    if !key.isEmpty && !name.isEmpty {
-                        catalogLaborTypes.append(DirectEntryCatalogLaborType(laborTypeKey: key, displayName: name, sortOrder: order))
-                    }
-                }
-            }
-            catalogLaborTypes.sort { $0.sortOrder < $1.sortOrder }
-            if catalogLaborTypes.isEmpty {
-                catalogLaborTypes = DirectEntryAssigneeOptions.fallbackLaborTypes
-            }
-
-            var projects = catalogProjects.map(\.displayName)
-            if projects.isEmpty {
-                projects = dataObj.optStringArray("projects", "du_an")
-            }
-
-            var recruiters = catalogRecruiters.map(\.label)
-            if recruiters.isEmpty {
-                recruiters = dataObj.optStringArray("recruiters", "nguoi_tuyen")
-            }
-
-            var banks = catalogBanks.map(\.displayName)
-            if banks.isEmpty {
-                banks = dataObj.optStringArray("banks", "ngan_hang")
-            }
-
-            var managers = dataObj.optStringArray("managers", "quan_ly")
-            if managers.isEmpty, let mgrObjs = dataObj["managers"] as? [[String: Any]] {
-                managers = mgrObjs.compactMap { m in
-                    let label = m.optString("display_name", "name", "manager_display", "manager_id")
-                    return label.isEmpty ? nil : label
-                }
-            }
-
-            let options = DirectEntryAssigneeOptions(
-                projects: projects,
-                managers: managers,
-                recruiters: recruiters,
-                banks: banks,
-                catalogProjects: catalogProjects,
-                catalogRecruiters: catalogRecruiters,
-                catalogBanks: catalogBanks,
-                catalogLaborTypes: catalogLaborTypes
-            )
+            let options = Self.parseAssigneeOptions(root)
             self.lastLoadedCatalog = options
             return .success(options, statusCode: response.statusCode)
         }
@@ -400,6 +428,10 @@ public final class DirectEntryService: @unchecked Sendable {
             httpStatus: response.statusCode,
             errorCode: response.errorCode
         )
+    }
+
+    public func setLoadedCatalog(_ catalog: DirectEntryAssigneeOptions) {
+        self.lastLoadedCatalog = catalog
     }
 
     public func clearCatalogCache() {
@@ -523,10 +555,8 @@ public final class DirectEntryService: @unchecked Sendable {
             return disp
         }()
 
-        let providerType: String = {
-            let raw = d.providerType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return raw == "vendor" ? "vendor" : "hrp"
-        }()
+        let sourceMode = d.effectiveSourceMode
+        let providerType = sourceMode.apiProviderType
 
         let resolvedRecruiterId: String = {
             let explicit = d.recruiterId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -655,7 +685,7 @@ public final class DirectEntryService: @unchecked Sendable {
             return dict
         }()
 
-        let rowObj: [String: Any] = [
+        var rowObj: [String: Any] = [
             "project_id": resolvedProjectId,
             "first_work_date": firstWorkDateIso,
             "provider_type": providerType,
@@ -670,6 +700,14 @@ public final class DirectEntryService: @unchecked Sendable {
             ]
         ]
 
+        // Only include `collaborator_id` when source is `.ctv`; NEVER send `NSNull()` on create.
+        if sourceMode == .ctv {
+            let cleanCollabId = d.collaboratorId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if DirectEntryCatalogCollaborator.isValidId(cleanCollabId) {
+                rowObj["collaborator_id"] = cleanCollabId
+            }
+        }
+
         return rowObj
     }
 
@@ -679,6 +717,31 @@ public final class DirectEntryService: @unchecked Sendable {
     ) async -> MiniBiApiResult<DirectEntryBatchSubmitOutcome> {
         if self.lastLoadedCatalog.catalogProjects.isEmpty && self.lastLoadedCatalog.catalogLaborTypes.isEmpty {
             _ = await fetchAssigneeOptions()
+        }
+
+        let batchHasCollaborator = drafts.contains {
+            $0.effectiveSourceMode == .ctv || !$0.collaboratorId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        if batchHasCollaborator {
+            for draft in drafts where draft.effectiveSourceMode == .ctv {
+                let cleanCollab = draft.collaboratorId.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard DirectEntryCatalogCollaborator.isValidId(cleanCollab) else {
+                    return .failure(
+                        message: "Vui lòng chọn Cộng tác viên (CTV) đang hoạt động.",
+                        httpStatus: 400,
+                        errorCode: "COLLABORATOR_REQUIRED"
+                    )
+                }
+                if let matched = lastLoadedCatalog.catalogCollaborators.first(where: { $0.collaboratorId == cleanCollab }),
+                   !matched.active {
+                    return .failure(
+                        message: "Cộng tác viên \"\(matched.displayName)\" đã ngừng hoạt động. Vui lòng chọn Cộng tác viên đang hoạt động.",
+                        httpStatus: 400,
+                        errorCode: "COLLABORATOR_INACTIVE"
+                    )
+                }
+            }
         }
 
         let fullProfileRows = drafts.map { buildFullProfileEntryPayload($0) }
@@ -695,8 +758,21 @@ public final class DirectEntryService: @unchecked Sendable {
             additionalHeaders: ["Idempotency-Key": batchIdempotencyKey]
         )
 
-        // Fallback to `/api/direct-entry/batches` if mock/legacy server returns 404
-        if response.statusCode == 404 {
+        if batchHasCollaborator {
+            let errUpper = (response.errorCode ?? "").uppercased()
+            let isUnsupported404 = response.statusCode == 404
+            let isUnsupportedBatchInvalid = response.statusCode == 400
+                && errUpper == "BATCH_INVALID"
+                && !self.lastLoadedCatalog.supportsCollaborators
+            if isUnsupported404 || isUnsupportedBatchInvalid {
+                return .failure(
+                    message: "Máy chủ hiện tại chưa hỗ trợ ghi nhận nguồn Cộng tác viên (CTV). Hồ sơ và lựa chọn đã nhập vẫn được giữ nguyên.",
+                    httpStatus: response.statusCode,
+                    errorCode: response.errorCode ?? "COLLABORATOR_UNSUPPORTED"
+                )
+            }
+        } else if response.statusCode == 404 {
+            // Fallback to `/api/direct-entry/batches` only when batch has NO collaborator rows
             let legacyRows: [[String: Any]] = drafts.map { d in
                 [
                     "row_id": d.rowId,
@@ -1085,7 +1161,32 @@ public final class DirectEntryService: @unchecked Sendable {
             return WorkerItem.isUuidLike(rawRecruiterDisplay) ? "" : rawRecruiterDisplay
         }()
         let teamId = entryObj.optNullableString("team_id")
-        let providerType = entryObj.optString("provider_type", defaultValue: "hrp")
+        let providerType = entryObj.optString("provider_type").ifEmpty(
+            recruiterObj?.optString("provider_type") ?? ""
+        ).ifEmpty("hrp")
+        let collaboratorObj = entryObj["collaborator"] as? [String: Any]
+        let rawCollaboratorId = entryObj.optNullableString("collaborator_id", "collaboratorId")
+            ?? collaboratorObj?.optNullableString("collaborator_id", "id")
+        let collaboratorId: String? = {
+            guard let cid = rawCollaboratorId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !cid.isEmpty,
+                  cid != "__system_vendor__" else {
+                return nil
+            }
+            return cid
+        }()
+        let rawCollaboratorDisplay = entryObj.optNullableString("collaborator_display_name", "collaboratorDisplayName", "collaborator_name")
+            ?? collaboratorObj?.optNullableString("display_name", "name")
+        let collaboratorDisplayName: String? = {
+            if let disp = rawCollaboratorDisplay?.trimmingCharacters(in: .whitespacesAndNewlines), !disp.isEmpty {
+                return disp
+            }
+            if let collaboratorId,
+               let matched = catalog.catalogCollaborators.first(where: { $0.collaboratorId == collaboratorId }) {
+                return matched.displayName
+            }
+            return nil
+        }()
         let laborType = entryObj.optString("labor_type", defaultValue: "thoi_vu")
         let rawLaborTypeDisplay = entryObj.optString("labor_type_display", defaultValue: laborType)
         let laborTypeDisplay: String = {
@@ -1265,6 +1366,8 @@ public final class DirectEntryService: @unchecked Sendable {
             recruiterDisplay: recruiterDisplay,
             teamId: teamId,
             providerType: providerType,
+            collaboratorId: collaboratorId,
+            collaboratorDisplayName: collaboratorDisplayName,
             laborType: laborType,
             laborTypeDisplay: laborTypeDisplay,
             displayName: displayName,
@@ -1300,11 +1403,15 @@ public final class DirectEntryService: @unchecked Sendable {
             bankId: detail.bankId,
             bankName: detail.rawBankName ?? detail.bankName
         )
+        let resolvedSource = detail.resolvedSourceMode
         return DirectEditFormInput(
             employeeCode: detail.employeeCode,
             projectId: detail.projectId,
             projectDisplay: detail.projectDisplay,
             firstWorkDateUi: DirectEntryContract.isoDateToUiDate(detail.firstWorkDate),
+            sourceMode: resolvedSource,
+            collaboratorId: resolvedSource == .ctv ? (detail.collaboratorId ?? "") : "",
+            collaboratorDisplayName: resolvedSource == .ctv ? (detail.resolvedCollaboratorDisplay ?? "") : "",
             recruiterId: detail.recruiterId,
             recruiterDisplay: detail.recruiterDisplay,
             laborTypeKey: detail.laborType,
@@ -1355,9 +1462,25 @@ public final class DirectEntryService: @unchecked Sendable {
         }
 
         let cleanRecruiterId = input.recruiterId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleanRecruiterId != baseline.recruiterId.trimmingCharacters(in: .whitespacesAndNewlines) &&
+        if cleanRecruiterId.isEmpty {
+            errors["recruiter_id"] = input.sourceMode == .vendor
+                ? "Vui lòng chọn Nhà cung cấp (Vendor) hợp lệ từ danh sách."
+                : "Vui lòng chọn Người tuyển (HRP) hợp lệ từ danh sách."
+        } else if cleanRecruiterId != baseline.recruiterId.trimmingCharacters(in: .whitespacesAndNewlines) &&
             UUID(uuidString: cleanRecruiterId) == nil {
-            errors["recruiter_id"] = "Vui lòng chọn Người tuyển hợp lệ từ danh sách."
+            errors["recruiter_id"] = input.sourceMode == .vendor
+                ? "Vui lòng chọn Nhà cung cấp (Vendor) hợp lệ từ danh sách."
+                : "Vui lòng chọn Người tuyển hợp lệ từ danh sách."
+        }
+
+        if input.sourceMode == .ctv {
+            let cleanCollabId = input.collaboratorId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseCollabId = (baseline.collaboratorId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleanCollabId.isEmpty {
+                errors["collaborator_id"] = "Vui lòng chọn Cộng tác viên (CTV) đang hoạt động."
+            } else if cleanCollabId != baseCollabId && !DirectEntryCatalogCollaborator.isValidId(cleanCollabId) {
+                errors["collaborator_id"] = "Mã Cộng tác viên (CTV) không hợp lệ."
+            }
         }
 
         let isoFirstWork = DirectEntryContract.uiDateToIsoDate(input.firstWorkDateUi)
@@ -1454,6 +1577,19 @@ public final class DirectEntryService: @unchecked Sendable {
         if !cleanRecruiterId.isEmpty && cleanRecruiterId != baseline.recruiterId.trimmingCharacters(in: .whitespacesAndNewlines) {
             patch["recruiter_id"] = cleanRecruiterId
         }
+
+        let baseCollabId = (baseline.collaboratorId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let nextCollabId = input.sourceMode == .ctv
+            ? input.collaboratorId.trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+        if !baseCollabId.isEmpty && input.sourceMode != .ctv {
+            // Actively switched from `.ctv` to `.hrpDirect` or `.vendor`: explicitly send `null` to detach collaborator
+            patch["collaborator_id"] = NSNull()
+        } else if input.sourceMode == .ctv && !nextCollabId.isEmpty && nextCollabId != baseCollabId {
+            // Actively assigned a new or different collaborator
+            patch["collaborator_id"] = nextCollabId
+        }
+        // Otherwise omit `"collaborator_id"` from `patch` so historical (even inactive) CTV link is preserved.
 
         let cleanLaborType = input.laborTypeKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !cleanLaborType.isEmpty && cleanLaborType != baseline.laborType.trimmingCharacters(in: .whitespacesAndNewlines) {
@@ -1623,8 +1759,8 @@ public final class DirectEntryService: @unchecked Sendable {
             let codeVal = patch["employee_code"] as? String ?? ""
             hints.append("• Mã NLĐ (\"\(codeVal)\"): Phải đúng định dạng hrp-XXXX-XXXXXX (ví dụ hrp-2026-001456).")
         }
-        if keys.contains("first_work_date") || keys.contains("project_id") || keys.contains("recruiter_id") || keys.contains("labor_type") {
-            hints.append("• Thông tin công việc: Kiểm tra Ngày bắt đầu (DD/MM/YYYY), Dự án, Người tuyển và Loại hình lao động phải đang hoạt động hợp lệ.")
+        if keys.contains("first_work_date") || keys.contains("project_id") || keys.contains("recruiter_id") || keys.contains("collaborator_id") || keys.contains("labor_type") {
+            hints.append("• Thông tin công việc: Kiểm tra Ngày bắt đầu (DD/MM/YYYY), Dự án, Người tuyển, CTV và Loại hình lao động phải đang hoạt động hợp lệ.")
         }
         if keys.contains("employment_status") {
             hints.append("• Trạng thái làm việc: Kiểm tra Ngày hiệu lực (DD/MM/YYYY) và nhập Lý do nghỉ nếu chọn Đã nghỉ.")

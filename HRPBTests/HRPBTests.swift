@@ -7019,4 +7019,417 @@ final class HRPBTests: XCTestCase {
         await vm.performLogout()
         XCTAssertEqual(reminderManager.lastSyncedAppBadgeCount, 0)
     }
+
+    // MARK: - PR #58 Collaborator (CTV) Support Tests
+
+    func testCollaboratorCatalogParsingSupportedEmptyAndLegacy() throws {
+        // 1. Catalog with collaborators (active, inactive, invalid ID, and __system_vendor__)
+        let supportedOptions = DirectEntryService.parseAssigneeOptions([
+            "catalog": [
+                "projects": [
+                    ["project_id": "proj-1", "display_name": "Dự án A", "is_active": true]
+                ],
+                "recruiters": [
+                    ["recruiter_id": "11111111-1111-4111-8111-111111111111", "display_name": "NVTD HRP 1", "provider_type": "hrp"],
+                    ["recruiter_id": "22222222-2222-4222-8222-222222222222", "display_name": "Vendor A", "provider_type": "vendor"]
+                ],
+                "collaborators": [
+                    ["collaborator_id": "ctv_hoa", "display_name": "Chị Hoa CTV", "active": true],
+                    ["collaborator_id": "ctv_old", "display_name": "Anh Cũ CTV", "active": false],
+                    ["collaborator_id": "__system_vendor__", "display_name": "System Vendor", "active": true],
+                    ["collaborator_id": "invalid id with spaces", "display_name": "Bad CTV", "active": true]
+                ]
+            ]
+        ])
+        XCTAssertTrue(supportedOptions.supportsCollaborators)
+        XCTAssertEqual(supportedOptions.catalogCollaborators.count, 2)
+        XCTAssertEqual(supportedOptions.activeCollaborators.map(\.collaboratorId), ["ctv_hoa"])
+        XCTAssertEqual(supportedOptions.catalogCollaborators.first(where: { $0.collaboratorId == "ctv_old" })?.active, false)
+
+        // 2. Catalog with empty collaborators array (`supportsCollaborators == true`, `collaborators == []`)
+        let emptyOptions = DirectEntryService.parseAssigneeOptions([
+            "catalog": [
+                "projects": [],
+                "recruiters": [],
+                "collaborators": []
+            ]
+        ])
+        XCTAssertTrue(emptyOptions.supportsCollaborators)
+        XCTAssertTrue(emptyOptions.catalogCollaborators.isEmpty)
+        XCTAssertTrue(emptyOptions.activeCollaborators.isEmpty)
+
+        // 3. Legacy catalog omitting `collaborators` (`supportsCollaborators == false`, zero errors)
+        let legacyOptions = DirectEntryService.parseAssigneeOptions([
+            "catalog": [
+                "projects": [
+                    ["project_id": "proj-1", "display_name": "Dự án A"]
+                ],
+                "recruiters": [
+                    ["recruiter_id": "11111111-1111-4111-8111-111111111111", "display_name": "NVTD HRP 1", "provider_type": "hrp"],
+                    ["recruiter_id": "22222222-2222-4222-8222-222222222222", "display_name": "Vendor A", "provider_type": "vendor"]
+                ]
+            ]
+        ])
+        XCTAssertFalse(legacyOptions.supportsCollaborators)
+        XCTAssertTrue(legacyOptions.catalogCollaborators.isEmpty)
+        XCTAssertEqual(legacyOptions.catalogRecruiters.count, 2)
+    }
+
+    @MainActor
+    func testCollaboratorFullProfilePayloadSourceSwitchingAndDraftPersistence() throws {
+        let client = makeMockHttpClient()
+        let service = DirectEntryService(httpClient: client)
+        let hrpRecruiter1 = "11111111-1111-4111-8111-111111111111"
+        let hrpRecruiter2 = "33333333-3333-4333-8333-333333333333"
+        let vendorRecruiter = "22222222-2222-4222-8222-222222222222"
+
+        service.setLoadedCatalog(DirectEntryAssigneeOptions(
+            catalogProjects: [DirectEntryCatalogProject(projectId: "proj-1", displayName: "Dự án A")],
+            catalogRecruiters: [
+                DirectEntryCatalogRecruiter(recruiterId: hrpRecruiter1, displayName: "NVTD Một", providerType: "hrp"),
+                DirectEntryCatalogRecruiter(recruiterId: hrpRecruiter2, displayName: "NVTD Hai", providerType: "hrp"),
+                DirectEntryCatalogRecruiter(recruiterId: vendorRecruiter, displayName: "Vendor A", providerType: "vendor")
+            ],
+            catalogCollaborators: [
+                DirectEntryCatalogCollaborator(collaboratorId: "ctv_hoa", displayName: "Chị Hoa CTV", active: true),
+                DirectEntryCatalogCollaborator(collaboratorId: "ctv_nam", displayName: "Anh Nam CTV", active: true)
+            ],
+            supportsCollaborators: true
+        ))
+
+        // 1. `.hrpDirect` omits `collaborator_id` completely (never sends NSNull on create)
+        let hrpDraft = NewWorkerEntryDraft(
+            projectId: "proj-1",
+            hoTen: "Nguyễn Văn A",
+            soCccd: "034099001122",
+            duAn: "Dự án A",
+            providerType: "hrp",
+            sourceMode: .hrpDirect,
+            recruiterId: hrpRecruiter1,
+            nguoiTuyen: "NVTD Một"
+        )
+        let hrpPayload = service.buildFullProfileEntryPayload(hrpDraft)
+        XCTAssertEqual(hrpPayload["provider_type"] as? String, "hrp")
+        XCTAssertEqual(hrpPayload["recruiter_id"] as? String, hrpRecruiter1)
+        XCTAssertFalse(hrpPayload.keys.contains("collaborator_id"), "HRP direct create payload must omit collaborator_id")
+
+        // 2. `.vendor` omits `collaborator_id` completely
+        let vendorDraft = NewWorkerEntryDraft(
+            projectId: "proj-1",
+            hoTen: "Nguyễn Văn B",
+            soCccd: "034099002233",
+            duAn: "Dự án A",
+            providerType: "vendor",
+            sourceMode: .vendor,
+            recruiterId: vendorRecruiter,
+            nguoiTuyen: "Vendor A"
+        )
+        let vendorPayload = service.buildFullProfileEntryPayload(vendorDraft)
+        XCTAssertEqual(vendorPayload["provider_type"] as? String, "vendor")
+        XCTAssertEqual(vendorPayload["recruiter_id"] as? String, vendorRecruiter)
+        XCTAssertFalse(vendorPayload.keys.contains("collaborator_id"), "Vendor create payload must omit collaborator_id")
+
+        // 3. `.ctv` sends `provider_type: "hrp"`, `recruiter_id`, and `collaborator_id` + M:N pairing
+        let ctvDraftA = NewWorkerEntryDraft(
+            projectId: "proj-1",
+            hoTen: "Nguyễn Văn C",
+            soCccd: "034099003344",
+            duAn: "Dự án A",
+            providerType: "hrp",
+            sourceMode: .ctv,
+            collaboratorId: "ctv_hoa",
+            collaboratorDisplayName: "Chị Hoa CTV",
+            recruiterId: hrpRecruiter1,
+            nguoiTuyen: "NVTD Một"
+        )
+        let ctvDraftB = NewWorkerEntryDraft(
+            projectId: "proj-1",
+            hoTen: "Nguyễn Văn D",
+            soCccd: "034099004455",
+            duAn: "Dự án A",
+            providerType: "hrp",
+            sourceMode: .ctv,
+            collaboratorId: "ctv_hoa",
+            collaboratorDisplayName: "Chị Hoa CTV",
+            recruiterId: hrpRecruiter2,
+            nguoiTuyen: "NVTD Hai"
+        )
+        let ctvPayloadA = service.buildFullProfileEntryPayload(ctvDraftA)
+        let ctvPayloadB = service.buildFullProfileEntryPayload(ctvDraftB)
+        XCTAssertEqual(ctvPayloadA["provider_type"] as? String, "hrp")
+        XCTAssertEqual(ctvPayloadA["recruiter_id"] as? String, hrpRecruiter1)
+        XCTAssertEqual(ctvPayloadA["collaborator_id"] as? String, "ctv_hoa")
+        XCTAssertEqual(ctvPayloadB["recruiter_id"] as? String, hrpRecruiter2)
+        XCTAssertEqual(ctvPayloadB["collaborator_id"] as? String, "ctv_hoa")
+
+        // 4. Switching sourceMode preserves/clears recruiter & CTV cleanly
+        var switched = ctvDraftA
+        switched.switchSourceMode(to: .hrpDirect)
+        XCTAssertEqual(switched.effectiveSourceMode, .hrpDirect)
+        XCTAssertEqual(switched.collaboratorId, "")
+        XCTAssertEqual(switched.collaboratorDisplayName, "")
+        XCTAssertEqual(switched.recruiterId, hrpRecruiter1, "Switching .ctv -> .hrpDirect must preserve HRP recruiter")
+
+        switched.switchSourceMode(to: .ctv)
+        XCTAssertEqual(switched.recruiterId, hrpRecruiter1, "Switching .hrpDirect -> .ctv must preserve HRP recruiter")
+        switched.collaboratorId = "ctv_nam"
+        switched.collaboratorDisplayName = "Anh Nam CTV"
+        switched.switchSourceMode(to: .vendor)
+        XCTAssertEqual(switched.collaboratorId, "")
+        XCTAssertEqual(switched.recruiterId, "", "Switching .ctv -> .vendor must clear incompatible HRP recruiter")
+
+        // 5. Draft persistence across tabs & ViewModel re-hydration
+        let suiteName = "com.aistudio.minibi.drafttest.\(UUID().uuidString)"
+        let testDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { testDefaults.removePersistentDomain(forName: suiteName) }
+
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.ctvrepo.\(UUID().uuidString)"))
+        let vm1 = MiniBiViewModel(repository: repo, directEntryService: service, draftStoreDefaults: testDefaults)
+        let user = MiniBiUser(id: "u-ctv-1", username: "nvtd.ctv", fullName: "NVTD", permissions: ["submission_create", "entry_create", "entry_read"], allowedWorkerTabs: ["all"])
+        vm1.onAuthenticatedSessionEstablished(user: user)
+        vm1.navigateTo(.newEntry)
+        let rowId = try XCTUnwrap(vm1.newWorkerDraftRows.first?.rowId)
+        vm1.updateNewWorkerDraftRow(rowId: rowId) { row in
+            row.switchSourceMode(to: .ctv)
+            row.projectId = "proj-1"
+            row.duAn = "Dự án A"
+            row.recruiterId = hrpRecruiter1
+            row.nguoiTuyen = "NVTD Một"
+            row.collaboratorId = "ctv_hoa"
+            row.collaboratorDisplayName = "Chị Hoa CTV"
+            row.soCccd = "034099003344"
+        }
+        vm1.navigateTo(.dashboard)
+        vm1.navigateTo(.newEntry)
+        XCTAssertEqual(vm1.newWorkerDraftRows.first?.effectiveSourceMode, .ctv)
+        XCTAssertEqual(vm1.newWorkerDraftRows.first?.collaboratorId, "ctv_hoa")
+
+        // Restore into fresh ViewModel instance
+        let vm2 = MiniBiViewModel(repository: repo, directEntryService: service, draftStoreDefaults: testDefaults)
+        vm2.onAuthenticatedSessionEstablished(user: user)
+        XCTAssertEqual(vm2.newWorkerDraftRows.first?.effectiveSourceMode, .ctv)
+        XCTAssertEqual(vm2.newWorkerDraftRows.first?.collaboratorId, "ctv_hoa")
+        XCTAssertEqual(vm2.newWorkerDraftRows.first?.collaboratorDisplayName, "Chị Hoa CTV")
+    }
+
+    @MainActor
+    func testCollaboratorSubmitBatchBlocksLegacy404And400FallbackAndPreservesDraft() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        var statusToReturn = 404
+        var bodyToReturn = #"{"ok":false,"error":"NOT_FOUND"}"#
+
+        MockURLProtocol.requestHandler = { req in
+            let url = req.url!
+            if url.path == "/api/direct-entry/check-duplicates" {
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(#"{"ok":true,"duplicates":[]}"#.utf8))
+            }
+            if url.path == "/api/direct-entry/batches/full-profile" {
+                let resp = HTTPURLResponse(url: url, statusCode: statusToReturn, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(bodyToReturn.utf8))
+            }
+            if url.path == "/api/direct-entry/batches" {
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(#"{"ok":true,"batch_id":99}"#.utf8))
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(#"{"ok":true,"items":[]}"#.utf8))
+        }
+
+        let suiteName = "com.aistudio.minibi.ctvsubmit.\(UUID().uuidString)"
+        let testDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { testDefaults.removePersistentDomain(forName: suiteName) }
+
+        let client = makeMockHttpClient()
+        let service = DirectEntryService(httpClient: client)
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.ctvsubmitrepo.\(UUID().uuidString)"))
+
+        // 1. Catalog lacks collaborators (`supportsCollaborators == false`) + 404 on full-profile -> block legacy fallback
+        service.setLoadedCatalog(DirectEntryAssigneeOptions(
+            catalogProjects: [DirectEntryCatalogProject(projectId: "proj-1", displayName: "Dự án A")],
+            catalogRecruiters: [DirectEntryCatalogRecruiter(recruiterId: "11111111-1111-4111-8111-111111111111", displayName: "NVTD", providerType: "hrp")],
+            supportsCollaborators: false
+        ))
+
+        let vm = MiniBiViewModel(repository: repo, directEntryService: service, draftStoreDefaults: testDefaults)
+        vm.currentUser = MiniBiUser(id: "u-sub", username: "nvtd", fullName: "NVTD", permissions: ["submission_create", "entry_create", "entry_read"])
+        vm.isAuthenticated = true
+        let att = LocalAttachmentItem(fileName: "portrait.jpg", mimeType: "image/jpeg", data: Data([0xFF, 0xD8, 0xFF]))
+        let rowId = vm.newWorkerDraftRows[0].rowId
+        vm.updateNewWorkerDraftRow(rowId: rowId) { row in
+            row.projectId = "proj-1"
+            row.duAn = "Dự án A"
+            row.switchSourceMode(to: .ctv)
+            row.recruiterId = "11111111-1111-4111-8111-111111111111"
+            row.nguoiTuyen = "NVTD"
+            row.collaboratorId = "ctv_hoa"
+            row.collaboratorDisplayName = "Chị Hoa CTV"
+            row.soCccd = "034099005566"
+            row.hoTen = "Lê Thị E"
+            row.portraitFile = att
+        }
+
+        await vm.submitNewWorkerDraftBatch(confirmedDuplicates: false)
+        XCTAssertFalse(vm.isSubmittingNewWorkers)
+        XCTAssertTrue(vm.bannerIsError)
+        XCTAssertEqual(vm.bannerMessage, "Máy chủ hiện tại chưa hỗ trợ ghi nhận nguồn Cộng tác viên (CTV). Hồ sơ và lựa chọn đã nhập vẫn được giữ nguyên.")
+        XCTAssertFalse(MockURLProtocol.recordedUrls().contains(where: { $0.hasSuffix("/api/direct-entry/batches") }), "Legacy /batches fallback MUST be blocked when batch has CTV")
+        XCTAssertEqual(vm.newWorkerDraftRows.count, 1)
+        XCTAssertEqual(vm.newWorkerDraftRows[0].collaboratorId, "ctv_hoa")
+        XCTAssertEqual(vm.newWorkerDraftRows[0].portraitFile, att)
+
+        // 2. 400 BATCH_INVALID when `!supportsCollaborators` -> also blocked cleanly & keeps draft
+        MockURLProtocol.resetRecordedUrls()
+        statusToReturn = 400
+        bodyToReturn = #"{"ok":false,"error":"BATCH_INVALID","message":"Unknown collaborator_id"}"#
+        await vm.submitNewWorkerDraftBatch(confirmedDuplicates: true)
+        XCTAssertEqual(vm.bannerMessage, "Máy chủ hiện tại chưa hỗ trợ ghi nhận nguồn Cộng tác viên (CTV). Hồ sơ và lựa chọn đã nhập vẫn được giữ nguyên.")
+        XCTAssertFalse(MockURLProtocol.recordedUrls().contains(where: { $0.hasSuffix("/api/direct-entry/batches") }))
+        XCTAssertEqual(vm.newWorkerDraftRows[0].collaboratorId, "ctv_hoa")
+
+        // 3. Non-CTV batch (`.hrpDirect`) on 404 still falls back to `/api/direct-entry/batches`
+        MockURLProtocol.resetRecordedUrls()
+        statusToReturn = 404
+        bodyToReturn = #"{"ok":false,"error":"NOT_FOUND"}"#
+        let hrpOnlyDraft = NewWorkerEntryDraft(
+            projectId: "proj-1",
+            hoTen: "Trần Văn F",
+            soCccd: "034099006677",
+            duAn: "Dự án A",
+            providerType: "hrp",
+            sourceMode: .hrpDirect,
+            recruiterId: "11111111-1111-4111-8111-111111111111",
+            nguoiTuyen: "NVTD"
+        )
+        let nonCtvRes = await service.submitBatch(drafts: [hrpOnlyDraft])
+        if case .failure = nonCtvRes {
+            XCTFail("Expected non-CTV 404 to fall back to legacy /api/direct-entry/batches")
+        }
+        XCTAssertTrue(MockURLProtocol.recordedUrls().contains(where: { $0.hasSuffix("/api/direct-entry/batches") }))
+    }
+
+    func testCollaboratorPrivilegedEditPatchAndWorkerDirectoryFilter() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.requestHandler = { req in
+            let url = req.url!
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(#"{"ok":true,"items":[],"total":0,"has_more":false}"#.utf8))
+        }
+
+        let client = makeMockHttpClient()
+        let service = DirectEntryService(httpClient: client)
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.ctvedit.\(UUID().uuidString)"))
+        let hrpRecId = "11111111-1111-4111-8111-111111111111"
+        let vendorRecId = "22222222-2222-4222-8222-222222222222"
+
+        service.setLoadedCatalog(DirectEntryAssigneeOptions(
+            catalogProjects: [DirectEntryCatalogProject(projectId: "proj-1", displayName: "Dự án A")],
+            catalogRecruiters: [
+                DirectEntryCatalogRecruiter(recruiterId: hrpRecId, displayName: "NVTD HRP", providerType: "hrp"),
+                DirectEntryCatalogRecruiter(recruiterId: vendorRecId, displayName: "Vendor A", providerType: "vendor")
+            ],
+            catalogCollaborators: [
+                DirectEntryCatalogCollaborator(collaboratorId: "ctv_old", displayName: "CTV Đã Ngừng", active: false),
+                DirectEntryCatalogCollaborator(collaboratorId: "ctv_new", displayName: "CTV Mới", active: true)
+            ],
+            supportsCollaborators: true
+        ))
+
+        // 1. Parse WorkerEntryDetail with historical inactive CTV
+        let detail = DirectEntryService.parseWorkerEntryDetail([
+            "entry": [
+                "entry_id": "entry-ctv-1",
+                "version": 2,
+                "employee_code": "hrp-1126-000111",
+                "display_name": "Phạm Văn CTV",
+                "project_id": "proj-1",
+                "project_display": "Dự án A",
+                "first_work_date": "2026-11-20",
+                "recruiter_id": hrpRecId,
+                "recruiter_display": "NVTD HRP",
+                "provider_type": "hrp",
+                "collaborator_id": "ctv_old",
+                "collaborator_display_name": "CTV Đã Ngừng",
+                "labor_type": "SEASONAL",
+                "labor_type_display": "Thời vụ",
+                "employment_status": ["status": "ON", "effective_date": "2026-11-20", "version": 1],
+                "worker_details": [
+                    "display_name": "Phạm Văn CTV",
+                    "phone": ["state": "provided", "value": "0901112223"]
+                ]
+            ]
+        ])
+        XCTAssertEqual(detail.resolvedSourceMode, .ctv)
+        XCTAssertEqual(detail.sourceDisplayLabel, "CTV")
+        XCTAssertEqual(detail.resolvedCollaboratorDisplay, "CTV Đã Ngừng")
+
+        var form = DirectEntryService.buildDirectEditFormInput(from: detail)
+        XCTAssertEqual(form.sourceMode, .ctv)
+        XCTAssertEqual(form.collaboratorId, "ctv_old")
+        XCTAssertEqual(form.collaboratorDisplayName, "CTV Đã Ngừng")
+
+        // 2. Edit unrelated field (phone) while keeping inactive historical CTV -> validation passes & patch OMITS collaborator_id
+        form.phone = "0909888777"
+        XCTAssertTrue(DirectEntryService.validateDirectEditFormFields(baseline: detail, input: form).isEmpty)
+        let phoneOnlyPatch = DirectEntryService.buildDirectEditPatch(baseline: detail, input: form)
+        XCTAssertFalse(phoneOnlyPatch.keys.contains("collaborator_id"), "Unchanged historical CTV must omit collaborator_id from patch")
+        let phoneJsonData = try JSONSerialization.data(withJSONObject: phoneOnlyPatch)
+        let phoneJsonStr = String(data: phoneJsonData, encoding: .utf8) ?? ""
+        XCTAssertFalse(phoneJsonStr.contains("collaborator_id"))
+
+        // 3. Switch `.ctv -> .hrpDirect` -> serializes `"collaborator_id":null`
+        var toHrpForm = DirectEntryService.buildDirectEditFormInput(from: detail)
+        toHrpForm.switchSourceMode(to: .hrpDirect)
+        XCTAssertTrue(DirectEntryService.validateDirectEditFormFields(baseline: detail, input: toHrpForm).isEmpty)
+        let toHrpPatch = DirectEntryService.buildDirectEditPatch(baseline: detail, input: toHrpForm)
+        XCTAssertTrue(toHrpPatch["collaborator_id"] is NSNull)
+        let toHrpJsonData = try JSONSerialization.data(withJSONObject: toHrpPatch)
+        let toHrpJsonStr = String(data: toHrpJsonData, encoding: .utf8) ?? ""
+        XCTAssertTrue(toHrpJsonStr.contains(#""collaborator_id":null"#))
+
+        // 4. Switch `.ctv -> .vendor` -> clears CTV (`null`) and updates `recruiter_id`
+        var toVendorForm = DirectEntryService.buildDirectEditFormInput(from: detail)
+        toVendorForm.switchSourceMode(to: .vendor)
+        toVendorForm.recruiterId = vendorRecId
+        toVendorForm.recruiterDisplay = "Vendor A"
+        XCTAssertTrue(DirectEntryService.validateDirectEditFormFields(baseline: detail, input: toVendorForm).isEmpty)
+        let toVendorPatch = DirectEntryService.buildDirectEditPatch(baseline: detail, input: toVendorForm)
+        XCTAssertTrue(toVendorPatch["collaborator_id"] is NSNull)
+        XCTAssertEqual(toVendorPatch["recruiter_id"] as? String, vendorRecId)
+
+        // 5. Switch to another active CTV -> sends new `collaborator_id`
+        var newCtvForm = DirectEntryService.buildDirectEditFormInput(from: detail)
+        newCtvForm.collaboratorId = "ctv_new"
+        newCtvForm.collaboratorDisplayName = "CTV Mới"
+        let newCtvPatch = DirectEntryService.buildDirectEditPatch(baseline: detail, input: newCtvForm)
+        XCTAssertEqual(newCtvPatch["collaborator_id"] as? String, "ctv_new")
+
+        // 6. WorkerItem display rules (Vendor, CTV with fallback ID, HRP)
+        let vendorWorker = MiniBiRepository.parseWorkerItem([
+            "entry_id": "w-v", "provider_type": "vendor", "collaborator_id": NSNull()
+        ])
+        let ctvFallbackWorker = MiniBiRepository.parseWorkerItem([
+            "entry_id": "w-c", "provider_type": "hrp", "collaborator_id": "ctv_unknown_inactive"
+        ])
+        let hrpWorker = MiniBiRepository.parseWorkerItem([
+            "entry_id": "w-h", "provider_type": "hrp"
+        ])
+        XCTAssertEqual(vendorWorker.sourceDisplayLabel, "Vendor")
+        XCTAssertEqual(ctvFallbackWorker.sourceDisplayLabel, "CTV")
+        XCTAssertEqual(ctvFallbackWorker.resolvedCollaboratorDisplay, "ctv_unknown_inactive")
+        XCTAssertEqual(hrpWorker.sourceDisplayLabel, "HRP")
+
+        // 7. `fetchWorkers` source filter query param (`hrp_direct`, `hrp_ctv`, `vendor`, omitted for `.all`)
+        MockURLProtocol.resetRecordedUrls()
+        _ = await repo.fetchWorkers(scope: "all", providerType: "")
+        _ = await repo.fetchWorkers(scope: "all", providerType: "hrp_direct")
+        _ = await repo.fetchWorkers(scope: "all", providerType: "hrp_ctv")
+        _ = await repo.fetchWorkers(scope: "all", providerType: "vendor")
+        let recorded = MockURLProtocol.recordedUrls()
+        XCTAssertEqual(recorded.count, 4)
+        XCTAssertFalse(recorded[0].contains("provider_type="))
+        XCTAssertTrue(recorded[1].contains("provider_type=hrp_direct"))
+        XCTAssertTrue(recorded[2].contains("provider_type=hrp_ctv"))
+        XCTAssertTrue(recorded[3].contains("provider_type=vendor"))
+    }
 }

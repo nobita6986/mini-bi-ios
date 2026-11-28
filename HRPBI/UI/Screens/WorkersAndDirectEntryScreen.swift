@@ -263,14 +263,19 @@ struct NewWorkerDraftRowCard: View {
     @State private var activeCameraTarget: DraftCameraTarget?
     @State private var showProjectSearchSheet: Bool = false
     @State private var showRecruiterSearchSheet: Bool = false
+    @State private var showCollaboratorSearchSheet: Bool = false
     @State private var showBankSearchSheet: Bool = false
 
     var body: some View {
         let theme = viewModel.selectedTheme
         let options = viewModel.directEntryOptions
+        let currentSourceMode = draft.effectiveSourceMode
         let filteredRecruiters = options.catalogRecruiters.filter {
-            $0.providerType.lowercased() == draft.providerType.lowercased()
+            $0.providerType.lowercased() == currentSourceMode.apiProviderType
         }
+        let showCtvSourceOption = options.supportsCollaborators
+            || !options.catalogCollaborators.isEmpty
+            || currentSourceMode == .ctv
 
         VStack(alignment: .leading, spacing: 12) {
             // Card Header
@@ -337,36 +342,36 @@ struct NewWorkerDraftRowCard: View {
                 .buttonStyle(.plain)
             }
 
-            // 2. HRP/Vendor * & Người tuyển / Vendor *
+            // 2. Nguồn tuyển * & Người tuyển / Vendor *
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("HRP/Vendor *")
+                    Text("Nguồn tuyển *")
                         .font(.caption2.weight(.semibold))
                         .foregroundColor(SemanticColors.textSecondary)
                     Menu {
-                        Button("HRP") {
+                        Button(WorkerSourceMode.hrpDirect.displayTitle) {
                             viewModel.updateNewWorkerDraftRow(rowId: draft.rowId) { row in
-                                if row.providerType != "hrp" {
-                                    row.providerType = "hrp"
-                                    row.recruiterId = ""
-                                    row.nguoiTuyen = ""
-                                }
+                                row.switchSourceMode(to: .hrpDirect)
                             }
                         }
-                        Button("Vendor") {
+                        Button(WorkerSourceMode.vendor.displayTitle) {
                             viewModel.updateNewWorkerDraftRow(rowId: draft.rowId) { row in
-                                if row.providerType != "vendor" {
-                                    row.providerType = "vendor"
-                                    row.recruiterId = ""
-                                    row.nguoiTuyen = ""
+                                row.switchSourceMode(to: .vendor)
+                            }
+                        }
+                        if showCtvSourceOption {
+                            Button(WorkerSourceMode.ctv.displayTitle) {
+                                viewModel.updateNewWorkerDraftRow(rowId: draft.rowId) { row in
+                                    row.switchSourceMode(to: .ctv)
                                 }
                             }
                         }
                     } label: {
                         HStack {
-                            Text(draft.providerType == "vendor" ? "Vendor" : "HRP")
+                            Text(currentSourceMode.displayTitle)
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(SemanticColors.textPrimary)
+                                .lineLimit(1)
                             Spacer()
                             Image(systemName: "chevron.down")
                                 .font(.caption2)
@@ -381,10 +386,10 @@ struct NewWorkerDraftRowCard: View {
                         )
                     }
                 }
-                .frame(width: 112)
+                .frame(width: 126)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(draft.providerType == "vendor" ? "Nhà cung cấp (Vendor) *" : "Người tuyển *")
+                    Text(currentSourceMode == .vendor ? "Nhà cung cấp (Vendor) *" : (currentSourceMode == .ctv ? "Người tuyển (HRP) *" : "Người tuyển *"))
                         .font(.caption2.weight(.semibold))
                         .foregroundColor(SemanticColors.textSecondary)
                     Button {
@@ -392,7 +397,7 @@ struct NewWorkerDraftRowCard: View {
                         showRecruiterSearchSheet = true
                     } label: {
                         HStack {
-                            Text(draft.nguoiTuyen.isEmpty ? "— Chọn Người tuyển / Vendor —" : draft.nguoiTuyen)
+                            Text(draft.nguoiTuyen.isEmpty ? (currentSourceMode == .vendor ? "— Chọn Vendor —" : "— Chọn Người tuyển —") : draft.nguoiTuyen)
                                 .font(.caption)
                                 .foregroundColor(draft.nguoiTuyen.isEmpty ? SemanticColors.textMuted : SemanticColors.textPrimary)
                                 .lineLimit(1)
@@ -410,6 +415,45 @@ struct NewWorkerDraftRowCard: View {
                         )
                     }
                     .buttonStyle(.plain)
+                }
+            }
+
+            if currentSourceMode == .ctv {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Cộng tác viên (CTV) *")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(SemanticColors.textSecondary)
+                    Button {
+                        KeyboardDismissal.dismiss()
+                        showCollaboratorSearchSheet = true
+                    } label: {
+                        HStack {
+                            let collabText = draft.collaboratorDisplayName.isEmpty
+                                ? (draft.collaboratorId.isEmpty ? "— Chọn Cộng tác viên (CTV) —" : draft.collaboratorId)
+                                : draft.collaboratorDisplayName
+                            Text(collabText)
+                                .font(.caption)
+                                .foregroundColor(draft.collaboratorId.isEmpty ? SemanticColors.textMuted : SemanticColors.textPrimary)
+                                .lineLimit(1)
+                            Spacer()
+                            Image(systemName: "chevron.down")
+                                .font(.caption2)
+                                .foregroundColor(SemanticColors.textMuted)
+                        }
+                        .padding(10)
+                        .background(Color(hex: 0xF8FAFC))
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(SemanticColors.borderSubtle, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    if options.activeCollaborators.isEmpty {
+                        Text("Chưa có Cộng tác viên đang hoạt động trong danh mục.")
+                            .font(.caption2)
+                            .foregroundColor(SemanticColors.warningText)
+                    }
                 }
             }
 
@@ -969,16 +1013,31 @@ struct NewWorkerDraftRowCard: View {
         }
         .sheet(isPresented: $showRecruiterSearchSheet) {
             DirectEntrySearchablePickerSheet(
-                title: draft.providerType == "vendor" ? "Chọn Nhà cung cấp (Vendor)" : "Chọn Người tuyển (HRP)",
+                title: currentSourceMode == .vendor ? "Chọn Nhà cung cấp (Vendor)" : "Chọn Người tuyển (HRP)",
                 placeholder: "Tìm tên hoặc mã nhân sự...",
-                items: filteredRecruiters.isEmpty
-                    ? options.catalogRecruiters.map { (id: $0.recruiterId, label: $0.label) }
-                    : filteredRecruiters.map { (id: $0.recruiterId, label: $0.label) },
+                items: filteredRecruiters.map { (id: $0.recruiterId, label: $0.label) },
                 allowCustomInput: options.catalogRecruiters.isEmpty,
                 onSelect: { id, label in
                     viewModel.updateNewWorkerDraftRow(rowId: draft.rowId) { row in
                         row.recruiterId = id
                         row.nguoiTuyen = label
+                    }
+                }
+            )
+            .hrpSheetPresentation(detents: [.medium, .large])
+        }
+        .sheet(isPresented: $showCollaboratorSearchSheet) {
+            DirectEntrySearchablePickerSheet(
+                title: "Chọn Cộng tác viên (CTV)",
+                placeholder: "Tìm tên hoặc mã CTV...",
+                items: options.activeCollaborators.map { (id: $0.collaboratorId, label: $0.displayName) },
+                allowCustomInput: false,
+                onSelect: { id, label in
+                    viewModel.updateNewWorkerDraftRow(rowId: draft.rowId) { row in
+                        row.sourceMode = .ctv
+                        row.providerType = "hrp"
+                        row.collaboratorId = id
+                        row.collaboratorDisplayName = label
                     }
                 }
             )
@@ -1891,7 +1950,33 @@ public struct WorkersScreen: View {
                             }
                         }
                         .padding(.horizontal, 14)
-                        .padding(.bottom, 10)
+                        .padding(.bottom, 8)
+                        .background(Color.white)
+
+                        // Source Filter Chips (`Tất cả` / `HRP trực tiếp` / `CTV` / `Vendor`)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(WorkerDirectorySourceFilter.allCases) { filter in
+                                    let isSelected = viewModel.workerSourceFilter == filter
+                                    Button {
+                                        HapticsManager.selection()
+                                        KeyboardDismissal.dismiss()
+                                        viewModel.selectWorkerSourceFilter(filter)
+                                    } label: {
+                                        Text(filter.displayTitle)
+                                            .font(.caption2.weight(isSelected ? .bold : .semibold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(isSelected ? theme.primary : SemanticColors.surfaceMuted)
+                                            .foregroundColor(isSelected ? .white : SemanticColors.textSecondary)
+                                            .clipShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 10)
+                        }
                         .background(Color.white)
 
                         Rectangle()
@@ -1954,16 +2039,36 @@ public struct WorkersScreen: View {
                                                 )
 
                                                 VStack(alignment: .leading, spacing: 3) {
-                                                    Text(worker.hoTen)
-                                                        .font(.subheadline.weight(.semibold))
-                                                        .foregroundColor(SemanticColors.textPrimary)
-                                                        .lineLimit(1)
-                                                        .minimumScaleFactor(0.92)
+                                                    HStack(spacing: 6) {
+                                                        Text(worker.hoTen)
+                                                            .font(.subheadline.weight(.semibold))
+                                                            .foregroundColor(SemanticColors.textPrimary)
+                                                            .lineLimit(1)
+                                                            .minimumScaleFactor(0.92)
+
+                                                        if worker.resolvedSourceMode != .hrpDirect {
+                                                            Text(worker.sourceDisplayLabel)
+                                                                .font(.system(size: 10, weight: .bold))
+                                                                .padding(.horizontal, 6)
+                                                                .padding(.vertical, 2)
+                                                                .background(worker.resolvedSourceMode == .ctv ? theme.primaryLight : Color(hex: 0xFEF3C7))
+                                                                .foregroundColor(worker.resolvedSourceMode == .ctv ? theme.primary : Color(hex: 0xB45309))
+                                                                .clipShape(Capsule())
+                                                        }
+                                                    }
 
                                                     Text(subtitleText)
                                                         .font(.caption)
                                                         .foregroundColor(SemanticColors.textSecondary)
                                                         .lineLimit(1)
+
+                                                    if let collabName = worker.resolvedCollaboratorDisplay, !collabName.isEmpty {
+                                                        let recText = worker.nguoiTuyen.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                        Text(recText.isEmpty ? "CTV: \(collabName)" : "CTV: \(collabName) · Tuyển: \(recText)")
+                                                            .font(.caption2)
+                                                            .foregroundColor(SemanticColors.textMuted)
+                                                            .lineLimit(1)
+                                                    }
                                                 }
 
                                                 Spacer(minLength: 6)
@@ -2111,6 +2216,10 @@ struct WorkerDetailSheet: View {
         let resolvedProject = pickNonEmpty(entryDetail?.duAn, worker.duAn)
         let resolvedLaborType = pickNonEmpty(entryDetail?.nganhNghe, worker.nganhNghe)
         let resolvedManager = pickNonEmpty(worker.quanLy)
+        let resolvedProviderType = pickNonEmpty(entryDetail?.providerType, worker.providerType)
+        let resolvedCollaboratorId = pickNonEmpty(entryDetail?.collaboratorId, worker.collaboratorId)
+        let resolvedCollaboratorName = pickNonEmpty(entryDetail?.resolvedCollaboratorDisplay, worker.resolvedCollaboratorDisplay, resolvedCollaboratorId)
+        let resolvedSourceMode = WorkerSourceMode.resolve(providerType: resolvedProviderType, collaboratorId: resolvedCollaboratorId)
         let resolvedRecruiter = pickNonEmpty(entryDetail?.nguoiTuyen, worker.nguoiTuyen)
         let resolvedStartDate = pickNonEmpty(entryDetail?.ngayVaoLam, worker.ngayVaoLam)
         let resolvedStatus = pickNonEmpty(entryDetail?.trangThaiLabel, worker.trangThai)
@@ -2173,6 +2282,10 @@ struct WorkerDetailSheet: View {
                             detailRow("Dự án", resolvedProject)
                             detailRow("Loại hình lao động", resolvedLaborType)
                             detailRow("Quản lý", resolvedManager)
+                            detailRow("Nguồn tuyển", resolvedSourceMode.shortDisplayTitle)
+                            if resolvedSourceMode == .ctv {
+                                detailRow("Cộng tác viên (CTV)", resolvedCollaboratorName)
+                            }
                             detailRow("Người tuyển", resolvedRecruiter)
                             detailRow("Ngày vào làm", resolvedStartDate)
                             detailRow("Trạng thái", resolvedStatus)
@@ -2444,6 +2557,7 @@ struct WorkerDirectEditSheet: View {
 
     @State private var showProjectPicker: Bool = false
     @State private var showRecruiterPicker: Bool = false
+    @State private var showCollaboratorPicker: Bool = false
     @State private var showLaborTypePicker: Bool = false
     @State private var showBankPicker: Bool = false
 
@@ -2623,11 +2737,15 @@ struct WorkerDirectEditSheet: View {
                 }
             }
             .sheet(isPresented: $showRecruiterPicker) {
-                let recruiterItems: [(id: String, label: String)] = viewModel.directEntryOptions.catalogRecruiters.map {
+                let targetProvider = form.sourceMode.apiProviderType
+                let filtered = viewModel.directEntryOptions.catalogRecruiters.filter {
+                    $0.providerType.lowercased() == targetProvider
+                }
+                let recruiterItems: [(id: String, label: String)] = filtered.map {
                     ($0.recruiterId, $0.label)
                 }
                 DirectEntrySearchablePickerSheet(
-                    title: "Chọn người tuyển",
+                    title: form.sourceMode == .vendor ? "Chọn Nhà cung cấp (Vendor)" : "Chọn Người tuyển (HRP)",
                     placeholder: "Tìm tên người tuyển hoặc mã...",
                     items: recruiterItems,
                     allowCustomInput: false
@@ -2635,6 +2753,21 @@ struct WorkerDirectEditSheet: View {
                     form.recruiterId = selectedId
                     let cleanName = selectedLabel.components(separatedBy: " · ").first ?? selectedLabel
                     form.nguoiTuyen = cleanName.replacingOccurrences(of: "Vendor: ", with: "")
+                }
+            }
+            .sheet(isPresented: $showCollaboratorPicker) {
+                let collabItems: [(id: String, label: String)] = viewModel.directEntryOptions.activeCollaborators.map {
+                    ($0.collaboratorId, $0.displayName)
+                }
+                DirectEntrySearchablePickerSheet(
+                    title: "Chọn Cộng tác viên (CTV)",
+                    placeholder: "Tìm tên hoặc mã CTV...",
+                    items: collabItems,
+                    allowCustomInput: false
+                ) { selectedId, selectedLabel in
+                    form.sourceMode = .ctv
+                    form.collaboratorId = selectedId
+                    form.collaboratorDisplayName = selectedLabel
                 }
             }
             .sheet(isPresented: $showBankPicker) {
@@ -2798,13 +2931,65 @@ struct WorkerDirectEditSheet: View {
                 showLaborTypePicker = true
             }
 
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Nguồn tuyển")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(SemanticColors.textSecondary)
+                let showCtvSource = viewModel.directEntryOptions.supportsCollaborators
+                    || !viewModel.directEntryOptions.catalogCollaborators.isEmpty
+                    || form.sourceMode == .ctv
+                let sourceModes: [WorkerSourceMode] = showCtvSource
+                    ? [.hrpDirect, .vendor, .ctv]
+                    : [.hrpDirect, .vendor]
+                HStack(spacing: 8) {
+                    ForEach(sourceModes) { mode in
+                        let selected = form.sourceMode == mode
+                        Button {
+                            KeyboardDismissal.dismiss()
+                            form.switchSourceMode(to: mode)
+                        } label: {
+                            Text(mode.displayTitle)
+                                .font(.caption.weight(selected ? .bold : .medium))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(selected ? theme.primaryLight : Color(hex: 0xF8FAFC))
+                                .foregroundColor(selected ? theme.primary : SemanticColors.textSecondary)
+                                .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
             directEditPickerButton(
-                label: "Người tuyển",
-                value: form.nguoiTuyen.isEmpty ? "Chọn người tuyển..." : form.nguoiTuyen,
+                label: form.sourceMode == .vendor ? "Nhà cung cấp (Vendor)" : (form.sourceMode == .ctv ? "Người tuyển (HRP)" : "Người tuyển"),
+                value: form.nguoiTuyen.isEmpty ? (form.sourceMode == .vendor ? "Chọn Nhà cung cấp (Vendor)..." : "Chọn người tuyển...") : form.nguoiTuyen,
                 error: fieldError("recruiter_id", "nguoi_tuyen")
             ) {
                 KeyboardDismissal.dismiss()
                 showRecruiterPicker = true
+            }
+
+            if form.sourceMode == .ctv {
+                let matchedCatalogCollab = viewModel.directEntryOptions.catalogCollaborators.first(where: {
+                    $0.collaboratorId == form.collaboratorId
+                })
+                let isHistoricalInactive = !form.collaboratorId.isEmpty && (matchedCatalogCollab?.active == false)
+                let baseCollabDisplay = form.collaboratorDisplayName.isEmpty ? form.collaboratorId : form.collaboratorDisplayName
+                let collabValueText: String = {
+                    if form.collaboratorId.isEmpty {
+                        return "Chọn Cộng tác viên (CTV)..."
+                    }
+                    return isHistoricalInactive ? "\(baseCollabDisplay) (Ngừng HĐ)" : baseCollabDisplay
+                }()
+                directEditPickerButton(
+                    label: "Cộng tác viên (CTV) *",
+                    value: collabValueText,
+                    error: fieldError("collaborator_id")
+                ) {
+                    KeyboardDismissal.dismiss()
+                    showCollaboratorPicker = true
+                }
             }
 
             directEditTextField(

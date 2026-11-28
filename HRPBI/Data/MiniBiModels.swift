@@ -1213,6 +1213,93 @@ public struct DirectEntryCatalogProject: Identifiable, Equatable, Sendable {
     }
 }
 
+public enum WorkerSourceMode: String, CaseIterable, Identifiable, Equatable, Sendable, Codable {
+    case hrpDirect = "hrp_direct"
+    case vendor = "vendor"
+    case ctv = "hrp_ctv"
+
+    public var id: String { rawValue }
+
+    public var displayTitle: String {
+        switch self {
+        case .hrpDirect: return "HRP trực tiếp"
+        case .vendor: return "Vendor"
+        case .ctv: return "CTV"
+        }
+    }
+
+    public var shortDisplayTitle: String {
+        switch self {
+        case .hrpDirect: return "HRP"
+        case .vendor: return "Vendor"
+        case .ctv: return "CTV"
+        }
+    }
+
+    public var apiProviderType: String {
+        self == .vendor ? "vendor" : "hrp"
+    }
+
+    public static func resolve(providerType: String, collaboratorId: String?) -> WorkerSourceMode {
+        if providerType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "vendor" {
+            return .vendor
+        }
+        let cleanCollab = (collaboratorId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanCollab.isEmpty && cleanCollab != "__system_vendor__" {
+            return .ctv
+        }
+        return .hrpDirect
+    }
+}
+
+public enum WorkerDirectorySourceFilter: String, CaseIterable, Identifiable, Equatable, Sendable {
+    case all = ""
+    case hrpDirect = "hrp_direct"
+    case ctv = "hrp_ctv"
+    case vendor = "vendor"
+
+    public var id: String { rawValue }
+
+    public var displayTitle: String {
+        switch self {
+        case .all: return "Tất cả"
+        case .hrpDirect: return "HRP trực tiếp"
+        case .ctv: return "CTV"
+        case .vendor: return "Vendor"
+        }
+    }
+
+    /// Only valid as `GET /api/direct-entry/workers` query `provider_type`. Never use in create/edit payloads.
+    public var queryValue: String? {
+        rawValue.isEmpty ? nil : rawValue
+    }
+}
+
+public struct DirectEntryCatalogCollaborator: Identifiable, Equatable, Sendable {
+    public var id: String { collaboratorId }
+    public let collaboratorId: String
+    public let displayName: String
+    public let active: Bool
+
+    public var displayLabelWithStatus: String {
+        active ? displayName : "\(displayName) (Ngừng HĐ)"
+    }
+
+    public static func isValidId(_ raw: String) -> Bool {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "__system_vendor__", trimmed.count <= 128 else {
+            return false
+        }
+        return trimmed.range(of: #"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"#, options: .regularExpression) != nil
+    }
+
+    public init(collaboratorId: String, displayName: String, active: Bool = true) {
+        self.collaboratorId = collaboratorId
+        self.displayName = displayName
+        self.active = active
+    }
+}
+
 public struct DirectEntryCatalogRecruiter: Identifiable, Equatable, Sendable {
     public var id: String { recruiterId }
     public let recruiterId: String
@@ -1275,7 +1362,7 @@ public struct DirectEntryCatalogLaborType: Identifiable, Equatable, Sendable {
     }
 }
 
-public struct LocalAttachmentItem: Identifiable, Equatable, Sendable {
+public struct LocalAttachmentItem: Identifiable, Equatable, Sendable, Codable {
     public let id: String
     public let fileName: String
     public let mimeType: String
@@ -1302,7 +1389,7 @@ public struct LocalAttachmentItem: Identifiable, Equatable, Sendable {
     }
 }
 
-public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable {
+public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable, Codable {
     public var id: String { rowId }
     public var rowId: String
 
@@ -1310,6 +1397,9 @@ public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable {
     public var projectId: String
     public var duAn: String // projectDisplay
     public var providerType: String // "hrp" | "vendor"
+    public var sourceMode: WorkerSourceMode
+    public var collaboratorId: String
+    public var collaboratorDisplayName: String
     public var recruiterId: String
     public var nguoiTuyen: String // recruiterDisplay
     public var laborTypeKey: String
@@ -1333,6 +1423,31 @@ public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable {
     public var cccdBackFile: LocalAttachmentItem?
     public var contractFiles: [LocalAttachmentItem]
 
+    public var effectiveSourceMode: WorkerSourceMode {
+        if providerType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "vendor" {
+            return .vendor
+        }
+        if sourceMode == .ctv || !collaboratorId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .ctv
+        }
+        return .hrpDirect
+    }
+
+    public mutating func switchSourceMode(to newMode: WorkerSourceMode) {
+        let previousMode = effectiveSourceMode
+        sourceMode = newMode
+        providerType = newMode.apiProviderType
+        if newMode != .ctv {
+            collaboratorId = ""
+            collaboratorDisplayName = ""
+        }
+        // Changing to/from Vendor invalidates recruiter list (`vendor` vs `hrp`), while `.ctv <-> .hrpDirect` preserves HRP recruiter
+        if (previousMode == .vendor) != (newMode == .vendor) {
+            recruiterId = ""
+            nguoiTuyen = ""
+        }
+    }
+
     public static func defaultTodayDateUi() -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -1355,6 +1470,9 @@ public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable {
         if nguoiTuyen.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && recruiterId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Vui lòng chọn Người tuyển / Vendor."
         }
+        if effectiveSourceMode == .ctv && !DirectEntryCatalogCollaborator.isValidId(collaboratorId) {
+            return "Vui lòng chọn Cộng tác viên (CTV) đang hoạt động."
+        }
         if nganhNghe.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && laborTypeKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Vui lòng chọn Loại hình lao động."
         }
@@ -1368,6 +1486,56 @@ public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable {
         return nil
     }
 
+    enum CodingKeys: String, CodingKey {
+        case rowId, projectId, duAn, providerType, sourceMode, collaboratorId, collaboratorDisplayName
+        case recruiterId, nguoiTuyen, laborTypeKey, nganhNghe, ngayVaoLam, trangThai, soCccd, hoTen
+        case gioiTinh, sdt, queQuan, ngaySinh, ngayCap, soTaiKhoan, bankAccountHolder, nganHang
+        case ghiChu, quanLy, portraitFile, cccdFrontFile, cccdBackFile, contractFiles
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.rowId = try c.decodeIfPresent(String.self, forKey: .rowId) ?? UUID().uuidString
+        self.projectId = try c.decodeIfPresent(String.self, forKey: .projectId) ?? ""
+        self.duAn = try c.decodeIfPresent(String.self, forKey: .duAn) ?? ""
+        let rawProvider = try c.decodeIfPresent(String.self, forKey: .providerType) ?? "hrp"
+        let cleanProvider = rawProvider.lowercased() == "vendor" ? "vendor" : "hrp"
+        let decodedCollabId = try c.decodeIfPresent(String.self, forKey: .collaboratorId) ?? ""
+        let decodedSource = try c.decodeIfPresent(WorkerSourceMode.self, forKey: .sourceMode)
+            ?? WorkerSourceMode.resolve(providerType: cleanProvider, collaboratorId: decodedCollabId)
+        self.sourceMode = decodedSource
+        self.providerType = decodedSource.apiProviderType
+        self.collaboratorId = decodedSource == .ctv ? decodedCollabId : ""
+        self.collaboratorDisplayName = decodedSource == .ctv
+            ? (try c.decodeIfPresent(String.self, forKey: .collaboratorDisplayName) ?? "")
+            : ""
+        self.recruiterId = try c.decodeIfPresent(String.self, forKey: .recruiterId) ?? ""
+        self.nguoiTuyen = try c.decodeIfPresent(String.self, forKey: .nguoiTuyen) ?? ""
+        let rawLt = try c.decodeIfPresent(String.self, forKey: .laborTypeKey) ?? "SEASONAL"
+        self.laborTypeKey = rawLt.isEmpty ? "SEASONAL" : rawLt
+        let rawNg = try c.decodeIfPresent(String.self, forKey: .nganhNghe) ?? "Thời vụ"
+        self.nganhNghe = rawNg.isEmpty ? "Thời vụ" : rawNg
+        let rawStart = try c.decodeIfPresent(String.self, forKey: .ngayVaoLam) ?? ""
+        self.ngayVaoLam = rawStart.isEmpty ? Self.defaultTodayDateUi() : rawStart
+        self.trangThai = try c.decodeIfPresent(String.self, forKey: .trangThai) ?? "Đang làm"
+        self.soCccd = try c.decodeIfPresent(String.self, forKey: .soCccd) ?? ""
+        self.hoTen = try c.decodeIfPresent(String.self, forKey: .hoTen) ?? ""
+        self.gioiTinh = try c.decodeIfPresent(String.self, forKey: .gioiTinh) ?? ""
+        self.sdt = try c.decodeIfPresent(String.self, forKey: .sdt) ?? ""
+        self.queQuan = try c.decodeIfPresent(String.self, forKey: .queQuan) ?? ""
+        self.ngaySinh = try c.decodeIfPresent(String.self, forKey: .ngaySinh) ?? ""
+        self.ngayCap = try c.decodeIfPresent(String.self, forKey: .ngayCap) ?? ""
+        self.soTaiKhoan = try c.decodeIfPresent(String.self, forKey: .soTaiKhoan) ?? ""
+        self.bankAccountHolder = try c.decodeIfPresent(String.self, forKey: .bankAccountHolder) ?? ""
+        self.nganHang = try c.decodeIfPresent(String.self, forKey: .nganHang) ?? ""
+        self.ghiChu = try c.decodeIfPresent(String.self, forKey: .ghiChu) ?? ""
+        self.quanLy = try c.decodeIfPresent(String.self, forKey: .quanLy) ?? ""
+        self.portraitFile = try c.decodeIfPresent(LocalAttachmentItem.self, forKey: .portraitFile)
+        self.cccdFrontFile = try c.decodeIfPresent(LocalAttachmentItem.self, forKey: .cccdFrontFile)
+        self.cccdBackFile = try c.decodeIfPresent(LocalAttachmentItem.self, forKey: .cccdBackFile)
+        self.contractFiles = try c.decodeIfPresent([LocalAttachmentItem].self, forKey: .contractFiles) ?? []
+    }
+
     public init(
         rowId: String = UUID().uuidString,
         projectId: String = "",
@@ -1375,6 +1543,9 @@ public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable {
         soCccd: String = "",
         duAn: String = "",
         providerType: String = "hrp",
+        sourceMode: WorkerSourceMode? = nil,
+        collaboratorId: String = "",
+        collaboratorDisplayName: String = "",
         recruiterId: String = "",
         laborTypeKey: String = "SEASONAL",
         trangThai: String = "Đang làm",
@@ -1401,7 +1572,12 @@ public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable {
         self.hoTen = hoTen
         self.soCccd = soCccd
         self.duAn = duAn
-        self.providerType = providerType.lowercased() == "vendor" ? "vendor" : "hrp"
+        let cleanCollab = collaboratorId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedSource = sourceMode ?? WorkerSourceMode.resolve(providerType: providerType, collaboratorId: cleanCollab)
+        self.sourceMode = resolvedSource
+        self.providerType = resolvedSource.apiProviderType
+        self.collaboratorId = resolvedSource == .ctv ? cleanCollab : ""
+        self.collaboratorDisplayName = resolvedSource == .ctv ? collaboratorDisplayName : ""
         self.recruiterId = recruiterId
         self.laborTypeKey = laborTypeKey.isEmpty ? "SEASONAL" : laborTypeKey
         self.trangThai = trangThai
@@ -1425,6 +1601,46 @@ public struct NewWorkerEntryDraft: Identifiable, Equatable, Sendable {
     }
 }
 
+public enum DirectEntryDraftStore {
+    private static let keyPrefix = "hrpbi.direct_entry.drafts.v1."
+
+    private static func storageKey(forUserId userId: String) -> String {
+        let clean = userId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return keyPrefix + (clean.isEmpty ? "anonymous" : clean)
+    }
+
+    public static func save(
+        _ drafts: [NewWorkerEntryDraft],
+        forUserId userId: String,
+        defaults: UserDefaults = .standard
+    ) {
+        let key = storageKey(forUserId: userId)
+        guard !drafts.isEmpty else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        if let encoded = try? JSONEncoder().encode(drafts) {
+            defaults.set(encoded, forKey: key)
+        }
+    }
+
+    public static func load(
+        forUserId userId: String,
+        defaults: UserDefaults = .standard
+    ) -> [NewWorkerEntryDraft] {
+        let key = storageKey(forUserId: userId)
+        guard let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([NewWorkerEntryDraft].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    public static func clear(forUserId userId: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: storageKey(forUserId: userId))
+    }
+}
+
 public struct DirectEntryAssigneeOptions: Equatable, Sendable {
     public let projects: [String]
     public let managers: [String]
@@ -1432,8 +1648,14 @@ public struct DirectEntryAssigneeOptions: Equatable, Sendable {
     public let banks: [String]
     public let catalogProjects: [DirectEntryCatalogProject]
     public let catalogRecruiters: [DirectEntryCatalogRecruiter]
+    public let catalogCollaborators: [DirectEntryCatalogCollaborator]
+    public let supportsCollaborators: Bool
     public let catalogBanks: [DirectEntryCatalogBank]
     public let catalogLaborTypes: [DirectEntryCatalogLaborType]
+
+    public var activeCollaborators: [DirectEntryCatalogCollaborator] {
+        catalogCollaborators.filter(\.active)
+    }
 
     public static let fallbackLaborTypes: [DirectEntryCatalogLaborType] = [
         DirectEntryCatalogLaborType(laborTypeKey: "SEASONAL", displayName: "Thời vụ", sortOrder: 10),
@@ -1447,6 +1669,8 @@ public struct DirectEntryAssigneeOptions: Equatable, Sendable {
         banks: [String] = [],
         catalogProjects: [DirectEntryCatalogProject] = [],
         catalogRecruiters: [DirectEntryCatalogRecruiter] = [],
+        catalogCollaborators: [DirectEntryCatalogCollaborator] = [],
+        supportsCollaborators: Bool = false,
         catalogBanks: [DirectEntryCatalogBank] = [],
         catalogLaborTypes: [DirectEntryCatalogLaborType] = DirectEntryAssigneeOptions.fallbackLaborTypes
     ) {
@@ -1456,6 +1680,8 @@ public struct DirectEntryAssigneeOptions: Equatable, Sendable {
         self.banks = banks
         self.catalogProjects = catalogProjects
         self.catalogRecruiters = catalogRecruiters
+        self.catalogCollaborators = catalogCollaborators
+        self.supportsCollaborators = supportsCollaborators
         self.catalogBanks = catalogBanks
         self.catalogLaborTypes = catalogLaborTypes.isEmpty ? Self.fallbackLaborTypes : catalogLaborTypes
     }
@@ -1596,6 +1822,24 @@ public struct WorkerItem: Identifiable, Equatable, Sendable {
     public let employmentEffectiveDate: String
     public let teamId: String
     public let providerType: String
+    public let collaboratorId: String?
+    public let collaboratorDisplayName: String?
+
+    public var resolvedSourceMode: WorkerSourceMode {
+        WorkerSourceMode.resolve(providerType: providerType, collaboratorId: collaboratorId)
+    }
+
+    public var sourceDisplayLabel: String {
+        resolvedSourceMode.shortDisplayTitle
+    }
+
+    public var resolvedCollaboratorDisplay: String? {
+        guard resolvedSourceMode == .ctv else { return nil }
+        let name = (collaboratorDisplayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { return name }
+        let cid = (collaboratorId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return cid.isEmpty ? nil : cid
+    }
 
     public static func isUuidLike(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1657,7 +1901,9 @@ public struct WorkerItem: Identifiable, Equatable, Sendable {
         employmentStatusCode: String = "ON",
         employmentEffectiveDate: String = "",
         teamId: String = "",
-        providerType: String = ""
+        providerType: String = "",
+        collaboratorId: String? = nil,
+        collaboratorDisplayName: String? = nil
     ) {
         self.maNld = maNld
         self.employeeCode = employeeCode
@@ -1699,6 +1945,10 @@ public struct WorkerItem: Identifiable, Equatable, Sendable {
         self.employmentEffectiveDate = employmentEffectiveDate
         self.teamId = teamId
         self.providerType = providerType
+        let cleanCollabId = collaboratorId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.collaboratorId = (cleanCollabId?.isEmpty == false && cleanCollabId != "__system_vendor__") ? cleanCollabId : nil
+        let cleanCollabName = collaboratorDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.collaboratorDisplayName = (cleanCollabName?.isEmpty == false) ? cleanCollabName : nil
     }
 }
 
@@ -1749,6 +1999,8 @@ public struct WorkerEntryDetail: Equatable, Sendable {
     public let recruiterDisplay: String
     public let teamId: String?
     public let providerType: String
+    public let collaboratorId: String?
+    public let collaboratorDisplayName: String?
     public let laborType: String
     public let laborTypeDisplay: String
     public let displayName: String
@@ -1779,6 +2031,22 @@ public struct WorkerEntryDetail: Equatable, Sendable {
     public let workerDetailsStates: [String: String]
     public let fileVersions: [String: Int]
     public let canDirectEdit: Bool
+
+    public var resolvedSourceMode: WorkerSourceMode {
+        WorkerSourceMode.resolve(providerType: providerType, collaboratorId: collaboratorId)
+    }
+
+    public var sourceDisplayLabel: String {
+        resolvedSourceMode.shortDisplayTitle
+    }
+
+    public var resolvedCollaboratorDisplay: String? {
+        guard resolvedSourceMode == .ctv else { return nil }
+        let name = (collaboratorDisplayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { return name }
+        let cid = (collaboratorId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return cid.isEmpty ? nil : cid
+    }
 
     // Vietnamese UI convenience aliases for read-only detail display
     public var soCccd: String { nationalId ?? "" }
@@ -1818,6 +2086,8 @@ public struct WorkerEntryDetail: Equatable, Sendable {
         recruiterDisplay: String = "",
         teamId: String? = nil,
         providerType: String = "hrp",
+        collaboratorId: String? = nil,
+        collaboratorDisplayName: String? = nil,
         laborType: String = "TEMPORARY",
         laborTypeDisplay: String = "Thời vụ",
         displayName: String = "",
@@ -1857,6 +2127,10 @@ public struct WorkerEntryDetail: Equatable, Sendable {
         self.recruiterDisplay = recruiterDisplay
         self.teamId = teamId
         self.providerType = providerType
+        let cleanCollabId = collaboratorId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.collaboratorId = (cleanCollabId?.isEmpty == false && cleanCollabId != "__system_vendor__") ? cleanCollabId : nil
+        let cleanCollabName = collaboratorDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.collaboratorDisplayName = (cleanCollabName?.isEmpty == false) ? cleanCollabName : nil
         self.laborType = laborType
         self.laborTypeDisplay = laborTypeDisplay
         self.displayName = displayName
@@ -1893,8 +2167,24 @@ public struct DirectEditFormInput: Equatable, Sendable {
     public var projectId: String
     public var projectDisplay: String
     public var firstWorkDateUi: String
+    public var sourceMode: WorkerSourceMode
+    public var collaboratorId: String
+    public var collaboratorDisplayName: String
     public var recruiterId: String
     public var recruiterDisplay: String
+
+    public mutating func switchSourceMode(to newMode: WorkerSourceMode) {
+        let previousMode = sourceMode
+        sourceMode = newMode
+        if newMode != .ctv {
+            collaboratorId = ""
+            collaboratorDisplayName = ""
+        }
+        if (previousMode == .vendor) != (newMode == .vendor) {
+            recruiterId = ""
+            recruiterDisplay = ""
+        }
+    }
     public var laborTypeKey: String
     public var laborTypeDisplay: String
     public var statusCode: String
@@ -2028,6 +2318,9 @@ public struct DirectEditFormInput: Equatable, Sendable {
         projectId: String = "",
         projectDisplay: String = "",
         firstWorkDateUi: String = "",
+        sourceMode: WorkerSourceMode = .hrpDirect,
+        collaboratorId: String = "",
+        collaboratorDisplayName: String = "",
         recruiterId: String = "",
         recruiterDisplay: String = "",
         laborTypeKey: String = "",
@@ -2053,6 +2346,10 @@ public struct DirectEditFormInput: Equatable, Sendable {
         self.projectId = projectId
         self.projectDisplay = projectDisplay
         self.firstWorkDateUi = firstWorkDateUi
+        let cleanCollab = collaboratorId.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.sourceMode = (!cleanCollab.isEmpty && sourceMode != .vendor) ? .ctv : sourceMode
+        self.collaboratorId = self.sourceMode == .ctv ? cleanCollab : ""
+        self.collaboratorDisplayName = self.sourceMode == .ctv ? collaboratorDisplayName : ""
         self.recruiterId = recruiterId
         self.recruiterDisplay = recruiterDisplay
         self.laborTypeKey = laborTypeKey

@@ -18,6 +18,7 @@ public final class MiniBiViewModel: ObservableObject {
     public let salaryAdvanceService: SalaryAdvanceService
     public let recruitmentPostService: RecruitmentPostService
     public let taskReminderManager: TaskReminderManager
+    private let draftStoreDefaults: UserDefaults
 
     // MARK: - Environment & Theme
     @Published public var environmentConfig: AppEnvironmentConfig = .current
@@ -141,6 +142,7 @@ public final class MiniBiViewModel: ObservableObject {
     @Published public var workerSearchQuery: String = ""
     @Published public var workerProjectFilter: String = ""
     @Published public var workerStatusFilter: String = ""
+    @Published public var workerSourceFilter: WorkerDirectorySourceFilter = .all
     @Published public var workers: [WorkerItem] = []
     @Published public var workersTotalCount: Int = 0
     @Published public var workersPage: Int = 1
@@ -455,7 +457,8 @@ public final class MiniBiViewModel: ObservableObject {
         attendanceExplanationService: AttendanceExplanationService = .shared,
         salaryAdvanceService: SalaryAdvanceService = .shared,
         recruitmentPostService: RecruitmentPostService = .shared,
-        taskReminderManager: TaskReminderManager = .shared
+        taskReminderManager: TaskReminderManager = .shared,
+        draftStoreDefaults: UserDefaults = .standard
     ) {
         self.repository = repository
         self.directEntryService = directEntryService
@@ -468,6 +471,7 @@ public final class MiniBiViewModel: ObservableObject {
         self.salaryAdvanceService = salaryAdvanceService
         self.recruitmentPostService = recruitmentPostService
         self.taskReminderManager = taskReminderManager
+        self.draftStoreDefaults = draftStoreDefaults
         self.attendanceTimeEvaluation = timeAnchorManager.evaluateAnchor()
         self.taskReminders = taskReminderManager.reconcileExpiredOnceReminders()
 
@@ -1187,6 +1191,7 @@ public final class MiniBiViewModel: ObservableObject {
         workerSearchQuery = ""
         workerProjectFilter = ""
         workerStatusFilter = ""
+        workerSourceFilter = .all
         workers = []
         workersTotalCount = 0
         workersPage = 1
@@ -1276,6 +1281,9 @@ public final class MiniBiViewModel: ObservableObject {
         isLoadingMoreBulletins = false
         isLoadingBulletinDetail = false
         if clearDraftRows {
+            if let prevUserId = currentUser?.id, !prevUserId.isEmpty {
+                DirectEntryDraftStore.clear(forUserId: prevUserId, defaults: draftStoreDefaults)
+            }
             newWorkerDraftRows = [NewWorkerEntryDraft()]
         }
     }
@@ -1333,9 +1341,15 @@ public final class MiniBiViewModel: ObservableObject {
             currentDestination = MiniBiNavDestination.resolveDefaultDestination(for: user)
         }
 
-        // Ensure at least 1 draft row is ready for "Cấp mới"
+        // Ensure at least 1 draft row is ready for "Cấp mới" and restore local draft rows if current row is pristine
         if newWorkerDraftRows.isEmpty {
             newWorkerDraftRows = [NewWorkerEntryDraft()]
+        }
+        if newWorkerDraftRows.count == 1 && !hasMeaningfulDraftContent(newWorkerDraftRows[0]) {
+            let restored = DirectEntryDraftStore.load(forUserId: user.id, defaults: draftStoreDefaults)
+            if !restored.isEmpty {
+                newWorkerDraftRows = restored
+            }
         }
 
         attendanceOutboxItems = attendanceOutboxService.listItemsForUser(userKey: user.username)
@@ -1412,10 +1426,14 @@ public final class MiniBiViewModel: ObservableObject {
     }
 
     public func performLogout() async {
+        let outgoingUserId = currentUser?.id
         sessionGeneration &+= 1
         cancelAllSessionTasks()
         notificationService.stopSseStream()
         attendanceOutboxService.stopNetworkAutoFlush()
+        if let outgoingUserId, !outgoingUserId.isEmpty {
+            DirectEntryDraftStore.clear(forUserId: outgoingUserId, defaults: draftStoreDefaults)
+        }
         isAuthenticated = false
         currentUser = nil
         hasExplicitDestinationOverride = false
@@ -2112,12 +2130,40 @@ public final class MiniBiViewModel: ObservableObject {
 
     // MARK: - Direct Entry ("Cấp mới") Draft Management & Submission
 
+    private func hasMeaningfulDraftContent(_ draft: NewWorkerEntryDraft) -> Bool {
+        !draft.projectId.isEmpty
+            || !draft.duAn.isEmpty
+            || !draft.recruiterId.isEmpty
+            || !draft.nguoiTuyen.isEmpty
+            || !draft.collaboratorId.isEmpty
+            || !draft.hoTen.isEmpty
+            || !draft.soCccd.isEmpty
+            || !draft.sdt.isEmpty
+            || draft.effectiveSourceMode != .hrpDirect
+            || draft.portraitFile != nil
+            || draft.cccdFrontFile != nil
+            || draft.cccdBackFile != nil
+            || !draft.contractFiles.isEmpty
+    }
+
+    private func persistDraftRowsIfAuthenticated() {
+        guard let userId = currentUser?.id, !userId.isEmpty else { return }
+        if newWorkerDraftRows.count == 1 && !hasMeaningfulDraftContent(newWorkerDraftRows[0]) {
+            DirectEntryDraftStore.clear(forUserId: userId, defaults: draftStoreDefaults)
+        } else {
+            DirectEntryDraftStore.save(newWorkerDraftRows, forUserId: userId, defaults: draftStoreDefaults)
+        }
+    }
+
     public func addNewWorkerDraftRow() {
         var newDraft = NewWorkerEntryDraft()
         if let prev = newWorkerDraftRows.last ?? newWorkerDraftRows.first {
             newDraft.projectId = prev.projectId
             newDraft.duAn = prev.duAn
-            newDraft.providerType = prev.providerType
+            newDraft.sourceMode = prev.effectiveSourceMode
+            newDraft.providerType = prev.effectiveSourceMode.apiProviderType
+            newDraft.collaboratorId = prev.effectiveSourceMode == .ctv ? prev.collaboratorId : ""
+            newDraft.collaboratorDisplayName = prev.effectiveSourceMode == .ctv ? prev.collaboratorDisplayName : ""
             newDraft.recruiterId = prev.recruiterId
             newDraft.nguoiTuyen = prev.nguoiTuyen
             newDraft.laborTypeKey = prev.laborTypeKey
@@ -2127,6 +2173,7 @@ public final class MiniBiViewModel: ObservableObject {
             newDraft.quanLy = prev.quanLy
         }
         newWorkerDraftRows.append(newDraft)
+        persistDraftRowsIfAuthenticated()
     }
 
     public func removeNewWorkerDraftRow(rowId: String) {
@@ -2134,6 +2181,7 @@ public final class MiniBiViewModel: ObservableObject {
         if newWorkerDraftRows.isEmpty {
             newWorkerDraftRows = [NewWorkerEntryDraft()]
         }
+        persistDraftRowsIfAuthenticated()
     }
 
     public func updateNewWorkerDraftRow(rowId: String, mutate: (inout NewWorkerEntryDraft) -> Void) {
@@ -2141,6 +2189,7 @@ public final class MiniBiViewModel: ObservableObject {
         var copy = newWorkerDraftRows[idx]
         mutate(&copy)
         newWorkerDraftRows[idx] = copy
+        persistDraftRowsIfAuthenticated()
     }
 
     @discardableResult
@@ -2162,6 +2211,7 @@ public final class MiniBiViewModel: ObservableObject {
             return false
         }
         newWorkerDraftRows[idx] = updated
+        persistDraftRowsIfAuthenticated()
         let summaryName = updated.hoTen.isEmpty ? data.soCccd : "\(data.soCccd) - \(updated.hoTen)"
         showBanner("Đã điền tự động CCCD: \(summaryName)")
         return true
@@ -2341,6 +2391,7 @@ public final class MiniBiViewModel: ObservableObject {
     /// Validates, checks duplicate CCCDs, submits valid rows in `newWorkerDraftRows`, uploads their documents
     /// (automatically merging 2+ contract images into 1 PDF), and removes ONLY the rows that succeeded!
     public func submitNewWorkerDraftBatch(confirmedDuplicates: Bool = false) async {
+        guard !isSubmittingNewWorkers else { return }
         guard let token = captureSessionToken(),
               let user = currentUser,
               user.canAccessNewWorkerEntry else {
@@ -2353,6 +2404,10 @@ public final class MiniBiViewModel: ObservableObject {
             } else {
                 showBanner("Vui lòng chọn Dự án, Người tuyển / Vendor, Loại hình LĐ và nhập Số CCCD (12 chữ số).", isError: true)
             }
+            return
+        }
+        if validRows.contains(where: { $0.effectiveSourceMode == .ctv && !DirectEntryCatalogCollaborator.isValidId($0.collaboratorId) }) {
+            showBanner("Vui lòng chọn Cộng tác viên (CTV) đang hoạt động.", isError: true)
             return
         }
 
@@ -2442,6 +2497,7 @@ public final class MiniBiViewModel: ObservableObject {
             let savedRowIdSet = Set(validRows.map { $0.rowId })
             let remainingRows = newWorkerDraftRows.filter { !savedRowIdSet.contains($0.rowId) }
             newWorkerDraftRows = remainingRows.isEmpty ? [NewWorkerEntryDraft()] : remainingRows
+            persistDraftRowsIfAuthenticated()
 
             showBanner("Đã lưu thành công \(outcome.createdCount) hồ sơ cấp mới.")
             await loadDirectEntryBatchHistory()
@@ -2459,6 +2515,12 @@ public final class MiniBiViewModel: ObservableObject {
         guard allowedKeys.contains(trimmed) else { return }
         guard selectedWorkerScope != trimmed else { return }
         selectedWorkerScope = trimmed
+        Task { await loadWorkers(resetPage: true) }
+    }
+
+    public func selectWorkerSourceFilter(_ filter: WorkerDirectorySourceFilter) {
+        guard workerSourceFilter != filter else { return }
+        workerSourceFilter = filter
         Task { await loadWorkers(resetPage: true) }
     }
 
@@ -2511,7 +2573,8 @@ public final class MiniBiViewModel: ObservableObject {
         let targetSearch = workerSearchQuery
         let targetProject = workerProjectFilter
         let targetStatus = workerStatusFilter
-        let dedupeKey = "workers:\(resolvedScope):\(targetSearch):\(targetProject):\(targetStatus)"
+        let targetSource = workerSourceFilter
+        let dedupeKey = "workers:\(resolvedScope):\(targetSearch):\(targetProject):\(targetStatus):\(targetSource.rawValue)"
 
         await runDeduplicatedSessionTask(key: dedupeKey, force: force) { [weak self] token in
             guard let self, self.isSessionValid(token) else { return }
@@ -2526,6 +2589,7 @@ public final class MiniBiViewModel: ObservableObject {
                 search: targetSearch,
                 project: targetProject,
                 status: targetStatus,
+                providerType: targetSource.queryValue ?? "",
                 cursor: nil,
                 pageSize: Self.leaveInboxPageSize
             )
@@ -2534,7 +2598,8 @@ public final class MiniBiViewModel: ObservableObject {
                   self.selectedWorkerScope == resolvedScope,
                   self.workerSearchQuery == targetSearch,
                   self.workerProjectFilter == targetProject,
-                  self.workerStatusFilter == targetStatus else {
+                  self.workerStatusFilter == targetStatus,
+                  self.workerSourceFilter == targetSource else {
                 return
             }
             switch res {
@@ -2572,6 +2637,7 @@ public final class MiniBiViewModel: ObservableObject {
         let targetSearch = workerSearchQuery
         let targetProject = workerProjectFilter
         let targetStatus = workerStatusFilter
+        let targetSource = workerSourceFilter
 
         isLoadingMoreWorkers = true
         defer {
@@ -2582,6 +2648,7 @@ public final class MiniBiViewModel: ObservableObject {
             search: targetSearch,
             project: targetProject,
             status: targetStatus,
+            providerType: targetSource.queryValue ?? "",
             cursor: cursor,
             pageSize: Self.leaveInboxPageSize
         )
@@ -2590,7 +2657,8 @@ public final class MiniBiViewModel: ObservableObject {
               selectedWorkerScope == resolvedScope,
               workerSearchQuery == targetSearch,
               workerProjectFilter == targetProject,
-              workerStatusFilter == targetStatus else {
+              workerStatusFilter == targetStatus,
+              workerSourceFilter == targetSource else {
             return
         }
         switch res {
