@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import CoreImage
 import PDFKit
 @testable import HRPBI
 
@@ -5737,7 +5738,9 @@ final class HRPBTests: XCTestCase {
 
     @MainActor
     func testRound9_HrpBulletinMockupItemsAndCategoryFilter() throws {
-        XCTAssertFalse(HrpBulletinContract.REMOTE_API_ENABLED)
+        XCTAssertTrue(HrpBulletinContract.REMOTE_API_ENABLED)
+        XCTAssertEqual(HrpBulletinContract.screenTitle, "Thông báo")
+        XCTAssertEqual(HrpBulletinContract.markAllReadPath, "/api/bulletins/read-all")
         XCTAssertEqual(
             HrpBulletinContract.buildListPath(category: .hrNews, pageSize: 20, cursor: "cur_1"),
             "/api/bulletins?category=HR_NEWS&page_size=20&cursor=cur_1"
@@ -5750,6 +5753,10 @@ final class HRPBTests: XCTestCase {
             HrpBulletinContract.buildMarkReadPath(bulletinId: "bul_20261113_001"),
             "/api/bulletins/bul_20261113_001/read"
         )
+        XCTAssertEqual(
+            HrpBulletinContract.buildAttachmentContentPath(bulletinId: "bul_20261113_001", attachmentId: "att_1"),
+            "/api/bulletins/bul_20261113_001/attachments/att_1/content"
+        )
 
         let vm = MiniBiViewModel()
         vm.resetBulletinReadStateForTesting()
@@ -5757,22 +5764,15 @@ final class HRPBTests: XCTestCase {
 
         XCTAssertFalse(vm.isBulletinSheetPresented)
         XCTAssertEqual(vm.selectedBulletinCategory, .all)
-        XCTAssertEqual(vm.bulletinItems.count, 3)
-        XCTAssertEqual(vm.pinnedBulletinCount, 2)
-        XCTAssertEqual(vm.unreadBulletinCount, 3)
-        XCTAssertTrue(vm.bulletinItems.contains(where: { $0.title == "Tin nhân sự ngày 13-11-2026" }))
-        XCTAssertTrue(vm.bulletinItems.contains(where: { $0.title == "Lịch nghỉ lễ ngày Văn hóa Việt Nam" }))
+        XCTAssertTrue(vm.bulletinItems.isEmpty, "Live mode must not pre-populate mockup bulletin items")
+        XCTAssertEqual(vm.unreadBulletinCount, 0)
 
-        vm.selectedBulletinCategory = .hrNews
-        XCTAssertEqual(vm.filteredBulletinItems.count, 1)
-        let hrBulletin = try XCTUnwrap(vm.filteredBulletinItems.first)
+        // Verify UIGraphicsImageRenderer, HrpCenteringZoomScrollView & UIGraphicsPDFRenderer 2-page PDF helpers
+        let hrBulletin = try XCTUnwrap(HrpBulletinItem.defaultMockupItems.first)
         XCTAssertEqual(hrBulletin.title, "Tin nhân sự ngày 13-11-2026")
         XCTAssertEqual(hrBulletin.imageAttachments.count, 1)
         XCTAssertEqual(hrBulletin.pdfAttachments.count, 1)
-        XCTAssertEqual(hrBulletin.attachmentSummary.imageCount, 1)
-        XCTAssertEqual(hrBulletin.attachmentSummary.pdfCount, 1)
 
-        // Verify UIGraphicsImageRenderer & UIGraphicsPDFRenderer 2-page PDF generation
         let imageAtt = try XCTUnwrap(hrBulletin.imageAttachments.first)
         let generatedImg = HrpBulletinMockupMediaGenerator.sampleImage(for: imageAtt, bulletin: hrBulletin)
         XCTAssertGreaterThan(generatedImg.size.width, 0)
@@ -5793,29 +5793,6 @@ final class HRPBTests: XCTestCase {
         let pdfUrl = try XCTUnwrap(HrpBulletinMockupMediaGenerator.samplePdfUrl(for: pdfAtt, bulletin: hrBulletin))
         let pdfDoc = try XCTUnwrap(PDFDocument(url: pdfUrl))
         XCTAssertEqual(pdfDoc.pageCount, 2)
-
-        vm.selectedBulletinCategory = .holidaySchedule
-        XCTAssertEqual(vm.filteredBulletinItems.count, 1)
-        XCTAssertEqual(vm.filteredBulletinItems.first?.title, "Lịch nghỉ lễ ngày Văn hóa Việt Nam")
-
-        // Verify local isRead & notification announcement persistence across ViewModel instances
-        let unannounced = vm.notifyUnannouncedBulletinsIfNeeded(postSystemNotification: false)
-        XCTAssertEqual(unannounced.count, 3)
-        // Second call returns empty because all 3 have now been announced
-        XCTAssertTrue(vm.notifyUnannouncedBulletinsIfNeeded(postSystemNotification: false).isEmpty)
-
-        vm.openBulletinFromNotification(bulletinId: "bulletin-hr-news-2026-11-13")
-        XCTAssertTrue(vm.isBulletinSheetPresented)
-        XCTAssertEqual(vm.selectedBulletinDetailId, "bulletin-hr-news-2026-11-13")
-        XCTAssertEqual(vm.unreadBulletinCount, 2)
-        XCTAssertEqual(vm.bulletinItems.first(where: { $0.id == "bulletin-hr-news-2026-11-13" })?.isRead, true)
-
-        let vmReloaded = MiniBiViewModel()
-        XCTAssertEqual(vmReloaded.unreadBulletinCount, 2)
-        XCTAssertEqual(vmReloaded.bulletinItems.first(where: { $0.id == "bulletin-hr-news-2026-11-13" })?.isRead, true)
-
-        vmReloaded.markAllBulletinsRead()
-        XCTAssertEqual(vmReloaded.unreadBulletinCount, 0)
 
         // Verify /api/bulletins JSON contract parser
         let parsedContractBulletin = try XCTUnwrap(HrpBulletinContract.parseBulletinItem([
@@ -6656,5 +6633,390 @@ final class HRPBTests: XCTestCase {
             ),
             "Trưởng bộ phận (Khối Vận Hành)"
         )
+    }
+
+    // MARK: - v1.1.2 CCCD 2021 QR Cyan Suppression + MRZ ICAO 9303 + Vietnamese OCR Tests
+
+    func testCccd2021MrzAndVietnameseOcrAndChecksumValidation() throws {
+        // 1. Real-world 2021 CCCD TD1 MRZ + combined Front/Back Vietnamese OCR lines
+        let combinedLines = [
+            "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM",
+            "Số / No.: 026198004355",
+            "Họ và tên / Full name:",
+            "ĐỖ THỊ LAN ANH",
+            "Ngày sinh / Date of birth: 18/12/1998",
+            "Giới tính / Sex: Nữ   Quốc tịch / Nationality: Việt Nam",
+            "Quê quán / Place of origin: Trung Kiên, Yên Lạc, Vĩnh Phúc",
+            "Nơi thường trú / Place of residence:",
+            "Xóm Chùa, Trung Kiên",
+            "Yên Lạc, Vĩnh Phúc",
+            "Có giá trị đến / Date of expiry: 18/12/2038",
+            "Ngày, tháng, năm / Date, month, year",
+            "04/07/2023",
+            "IDVNM1980043557026198004355<<9",
+            "9812183F3812181VNM<<<<<<<<<<<8",
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        let parsedCombined = try XCTUnwrap(CccdQrDecoder.parseFromRecognizedTextLines(combinedLines))
+        XCTAssertEqual(parsedCombined.soCccd, "026198004355")
+        XCTAssertEqual(parsedCombined.hoTen, "ĐỖ THỊ LAN ANH")
+        XCTAssertEqual(parsedCombined.ngaySinh, "18/12/1998")
+        XCTAssertEqual(parsedCombined.gioiTinh, "Nữ")
+        XCTAssertEqual(parsedCombined.queQuan, "Xóm Chùa, Trung Kiên, Yên Lạc, Vĩnh Phúc")
+        XCTAssertEqual(parsedCombined.ngayCap, "04/07/2023")
+
+        // 2. MRZ-only back-side lines fall back to unaccented MRZ name + issue date
+        let backOnlyLines = [
+            "04/07/2023",
+            "Ngày, tháng, năm / Date, month, year",
+            "IDVNM1980043557026198004355<<9",
+            "9812183F3812181VNM<<<<<<<<<<<8",
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        let parsedBack = try XCTUnwrap(CccdQrDecoder.parseFromRecognizedTextLines(backOnlyLines))
+        XCTAssertEqual(parsedBack.soCccd, "026198004355")
+        XCTAssertEqual(parsedBack.hoTen, "DO THI LAN ANH")
+        XCTAssertEqual(parsedBack.ngaySinh, "18/12/1998")
+        XCTAssertEqual(parsedBack.gioiTinh, "Nữ")
+        XCTAssertEqual(parsedBack.ngayCap, "04/07/2023")
+
+        // 3. Modulo-10 OCR digit-typo sanitization (O->0, I/L->1, B->8, S->5) passes when checksum matches
+        let typoMrzLines = [
+            "IDVNM198OO43557O26I980O4355<<9",
+            "98L2I83F3812181VNM<<<<<<<<<<<8",
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        let parsedTypo = try XCTUnwrap(CccdQrDecoder.parseMrzFromLines(typoMrzLines))
+        XCTAssertEqual(parsedTypo.soCccd, "026198004355")
+        XCTAssertEqual(parsedTypo.ngaySinh, "18/12/1998")
+        XCTAssertEqual(parsedTypo.gioiTinh, "Nữ")
+
+        // 4. Corrupted check digit in Line 1 must be rejected cleanly (fail-closed)
+        let badLine1Checksum = [
+            "IDVNM1980043550026198004355<<9", // check digit 7 corrupted to 0
+            "9812183F3812181VNM<<<<<<<<<<<8",
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        XCTAssertNil(CccdQrDecoder.parseMrzFromLines(badLine1Checksum))
+
+        // Corrupted check digit in Line 2 DOB must reject DOB instead of filling wrong birth date
+        let badLine2DobChecksum = [
+            "IDVNM1980043557026198004355<<9",
+            "9812180F3812181VNM<<<<<<<<<<<8", // check digit 3 corrupted to 0
+            "DO<<THI<LAN<ANH<<<<<<<<<<<<<<<"
+        ]
+        let parsedWithBadDob = try XCTUnwrap(CccdQrDecoder.parseMrzFromLines(badLine2DobChecksum))
+        XCTAssertEqual(parsedWithBadDob.soCccd, "026198004355")
+        XCTAssertEqual(parsedWithBadDob.ngaySinh, "")
+        XCTAssertEqual(parsedWithBadDob.gioiTinh, "Nữ") // From 4th digit '1' of CCCD
+
+        // 5. Smart fill (onlyEmptyFields: true): upgrades unaccented MRZ name -> Vietnamese diacritic name without clobbering manual fields
+        var draft = NewWorkerEntryDraft()
+        draft = CccdQrDecoder.applyToDraft(draft, qrData: parsedBack, onlyEmptyFields: true)
+        XCTAssertEqual(draft.hoTen, "DO THI LAN ANH")
+        draft.sdt = "0912345678"
+        let frontOcrOnly = try XCTUnwrap(CccdQrDecoder.parseFromRecognizedTextLines([
+            "Số / No.: 026198004355",
+            "Họ và tên / Full name: ĐỖ THỊ LAN ANH",
+            "Nơi thường trú / Place of residence:",
+            "Xóm Chùa, Trung Kiên",
+            "Yên Lạc, Vĩnh Phúc"
+        ]))
+        draft = CccdQrDecoder.applyToDraft(draft, qrData: frontOcrOnly, onlyEmptyFields: true)
+        XCTAssertEqual(draft.hoTen, "ĐỖ THỊ LAN ANH")
+        XCTAssertEqual(draft.queQuan, "Xóm Chùa, Trung Kiên, Yên Lạc, Vĩnh Phúc")
+        XCTAssertEqual(draft.ngayCap, "04/07/2023")
+        XCTAssertEqual(draft.sdt, "0912345678")
+    }
+
+    func testCccd2021QrDetectionWithTealBackgroundAndVerticalRotation() throws {
+        let payload = "026198004355||Đỗ Thị Lan Anh|18121998|Nữ|Xóm Chùa, Trung Kiên, Yên Lạc, Vĩnh Phúc|04072023"
+        let filter = try XCTUnwrap(CIFilter(name: "CIQRCodeGenerator"))
+        filter.setValue(Data(payload.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        let qrCi = try XCTUnwrap(filter.outputImage)
+            .transformed(by: CGAffineTransform(scaleX: 4, y: 4))
+        let ciCtx = CIContext()
+        let qrCg = try XCTUnwrap(ciCtx.createCGImage(qrCi, from: qrCi.extent))
+
+        // Render a vertical card photo with teal/cyan 2021 CCCD background and a small QR placed in bottom-right corner
+        let canvasSize = CGSize(width: 900, height: 1400)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: canvasSize, format: format)
+        let cardImg = renderer.image { ctx in
+            UIColor(red: 0.72, green: 0.90, blue: 0.89, alpha: 1.0).setFill()
+            ctx.fill(CGRect(origin: .zero, size: canvasSize))
+
+            // Place crisp small QR in bottom-right corner (vertical card layout)
+            ctx.cgContext.interpolationQuality = .none
+            let qrRect = CGRect(x: 680, y: 1160, width: 170, height: 170)
+            UIImage(cgImage: qrCg).draw(in: qrRect)
+
+            // Draw simulated teal security wave lines over the card
+            UIColor(red: 0.35, green: 0.72, blue: 0.71, alpha: 0.35).setStroke()
+            let wavePath = UIBezierPath()
+            wavePath.lineWidth = 2
+            for y in stride(from: 40, through: 1360, by: 28) {
+                wavePath.move(to: CGPoint(x: 0, y: y))
+                wavePath.addLine(to: CGPoint(x: 900, y: y + 18))
+            }
+            wavePath.stroke()
+        }
+        let jpegData = try XCTUnwrap(cardImg.jpegData(compressionQuality: 0.75))
+
+        let detected = CccdQrScannerSheet.detectQrFromImageData(jpegData)
+        XCTAssertEqual(detected, payload)
+        let parsed = try XCTUnwrap(CccdQrDecoder.parse(detected))
+        XCTAssertEqual(parsed.soCccd, "026198004355")
+        XCTAssertEqual(parsed.hoTen, "Đỗ Thị Lan Anh")
+    }
+
+    // MARK: - Build 172 Live /api/bulletins* + App Icon Badge Sync + SHA-256 LRU Cache Tests
+
+    @MainActor
+    func testLiveBulletinsApiBadgeSync404GracefulAndAttachmentCache() async throws {
+        MockURLProtocol.resetRecordedUrls()
+        MockURLProtocol.pathDelaySec = [:]
+
+        let sampleData = Data("HRPartner Live PDF Payload v1.1.2".utf8)
+        let sampleSha = HrpBulletinAttachmentCache.sha256Hex(of: sampleData)
+        var shouldReturn404 = false
+
+        MockURLProtocol.requestHandler = { req in
+            let url = req.url!
+            let path = url.path
+            let method = req.httpMethod ?? "GET"
+
+            if path == "/api/bulletins" && method == "GET" {
+                if shouldReturn404 {
+                    let body = #"{"ok":false,"code":"NOT_FOUND","message":"Not enabled"}"#
+                    let resp = HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                    return (resp, Data(body.utf8))
+                }
+                let query = url.query ?? ""
+                if query.contains("cursor=cur_p2") {
+                    let body = """
+                    {
+                      "ok": true,
+                      "data": {
+                        "items": [
+                          {
+                            "id": "bul_2",
+                            "category": "INTERNAL_POLICY",
+                            "category_display": "Nội quy",
+                            "title": "Quy định chấm công mới",
+                            "summary": "Cập nhật quy định chấm công.",
+                            "content_sections": ["Chi tiết quy định"],
+                            "published_at": "2026-11-28T07:00:00Z",
+                            "published_date_display": "28-11-2026",
+                            "is_read": false,
+                            "attachments": []
+                          }
+                        ],
+                        "unread_count": 2,
+                        "next_cursor": null,
+                        "has_more": false
+                      }
+                    }
+                    """
+                    let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                    return (resp, Data(body.utf8))
+                }
+                let body = """
+                {
+                  "ok": true,
+                  "data": {
+                    "items": [
+                      {
+                        "id": "bul_1",
+                        "category": "HR_NEWS",
+                        "category_display": "Tin nhân sự",
+                        "title": "Thông báo vận hành sáng 28/11",
+                        "summary": "Nhắc lịch cập nhật hồ sơ.",
+                        "content_sections": [],
+                        "published_at": "2026-11-28T08:00:00Z",
+                        "published_date_display": "28-11-2026",
+                        "is_read": false,
+                        "attachment_summary": { "image_count": 0, "pdf_count": 1 }
+                      }
+                    ],
+                    "unread_count": 2,
+                    "next_cursor": "cur_p2",
+                    "has_more": true
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path == "/api/bulletins/bul_1" && method == "GET" {
+                let body = """
+                {
+                  "ok": true,
+                  "data": {
+                    "id": "bul_1",
+                    "category": "HR_NEWS",
+                    "category_display": "Tin nhân sự",
+                    "title": "Thông báo vận hành sáng 28/11",
+                    "summary": "Nhắc lịch cập nhật hồ sơ.",
+                    "content_sections": ["Đoạn chi tiết 1", "Đoạn chi tiết 2"],
+                    "published_at": "2026-11-28T08:00:00Z",
+                    "published_date_display": "28-11-2026",
+                    "is_read": true,
+                    "attachments": [
+                      {
+                        "id": "att_pdf_1",
+                        "kind": "PDF",
+                        "file_name": "huong-dan.pdf",
+                        "title": "Hướng dẫn chi tiết",
+                        "mime_type": "application/pdf",
+                        "file_size_bytes": \(sampleData.count),
+                        "url": "/api/bulletins/bul_1/attachments/att_pdf_1/content",
+                        "page_count": 2,
+                        "sha256": "\(sampleSha)"
+                      }
+                    ]
+                  }
+                }
+                """
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path == "/api/bulletins/bul_1/read" && method == "POST" {
+                let body = #"{"ok":true,"data":{"unread_count":1}}"#
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path == "/api/bulletins/read-all" && method == "POST" {
+                let body = #"{"ok":true,"data":{"unread_count":0}}"#
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+                return (resp, Data(body.utf8))
+            } else if path == "/api/bulletins/bul_1/attachments/att_pdf_1/content" && method == "GET" {
+                let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/pdf"])!
+                return (resp, sampleData)
+            }
+            let resp = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            return (resp, Data(#"{"ok":true}"#.utf8))
+        }
+
+        let client = makeMockHttpClient()
+        let repo = MiniBiRepository(httpClient: client, keychain: KeychainStore(serviceName: "com.aistudio.minibi.bul172.\(UUID().uuidString)"))
+        let reminderManager = TaskReminderManager(
+            userDefaults: UserDefaults(suiteName: "com.aistudio.minibi.bul172.rem.\(UUID().uuidString)")!,
+            scheduleSystemNotifications: false,
+            playSystemAudioPreview: false
+        )
+        let vm = MiniBiViewModel(
+            repository: repo,
+            directEntryService: DirectEntryService(httpClient: client),
+            workReportsService: WorkReportsAndReportingService(httpClient: client),
+            taskReminderManager: reminderManager
+        )
+        vm.resetBulletinReadStateForTesting()
+        defer { vm.resetBulletinReadStateForTesting() }
+
+        vm.currentUser = MiniBiUser(
+            id: "aaaa1720-1111-4222-8333-444444444444",
+            username: "user.172",
+            fullName: "Nhân Sự 172",
+            permissions: ["entry_read"],
+            allowedWorkerTabs: []
+        )
+        vm.isAuthenticated = true
+
+        // 1. Load list page 1 + pagination page 2 -> badge synced to 2
+        await vm.loadBulletins(category: .all, reset: true, notifyNewItems: false)
+        XCTAssertEqual(vm.bulletinItems.count, 1)
+        XCTAssertTrue(vm.bulletinHasMore)
+        XCTAssertEqual(vm.unreadBulletinCount, 2)
+        XCTAssertEqual(reminderManager.lastSyncedAppBadgeCount, 2)
+
+        await vm.loadMoreBulletins()
+        XCTAssertEqual(vm.bulletinItems.count, 2)
+        XCTAssertFalse(vm.bulletinHasMore)
+
+        // 2. Detail GET must have 0 query params (`assertNoQueryParams`)
+        vm.selectedBulletinDetailId = "bul_1"
+        await vm.loadBulletinDetail(bulletinId: "bul_1")
+        XCTAssertEqual(vm.selectedBulletinDetail?.contentSections.count, 2)
+        let detailReq = try XCTUnwrap(MockURLProtocol.recordedRequests().first(where: { $0.url.contains("/api/bulletins/bul_1") && !$0.url.contains("/read") && !$0.url.contains("/attachments/") }))
+        XCTAssertFalse(detailReq.url.contains("?"))
+
+        // 3. Mark single read & read-all must have 0 query params + empty JSON body and update badge 2 -> 1 -> 0
+        await vm.markBulletinReadAsync("bul_1")
+        XCTAssertEqual(vm.unreadBulletinCount, 1)
+        XCTAssertEqual(reminderManager.lastSyncedAppBadgeCount, 1)
+        let markReadReq = try XCTUnwrap(MockURLProtocol.recordedRequests().first(where: { $0.url.contains("/api/bulletins/bul_1/read") }))
+        XCTAssertFalse(markReadReq.url.contains("?"))
+        XCTAssertEqual(markReadReq.bodyString, "{}")
+
+        await vm.markAllBulletinsReadAsync()
+        XCTAssertEqual(vm.unreadBulletinCount, 0)
+        XCTAssertEqual(reminderManager.lastSyncedAppBadgeCount, 0)
+        let markAllReq = try XCTUnwrap(MockURLProtocol.recordedRequests().first(where: { $0.url.contains("/api/bulletins/read-all") }))
+        XCTAssertFalse(markAllReq.url.contains("?"))
+        XCTAssertEqual(markAllReq.bodyString, "{}")
+
+        // 4. 404 graceful empty fallback (no error banner)
+        vm.dismissBanner()
+        shouldReturn404 = true
+        await vm.loadBulletins(category: .all, reset: true, notifyNewItems: false)
+        XCTAssertTrue(vm.bulletinItems.isEmpty)
+        XCTAssertEqual(vm.unreadBulletinCount, 0)
+        XCTAssertEqual(reminderManager.lastSyncedAppBadgeCount, 0)
+        XCTAssertNil(vm.bannerMessage)
+
+        // 5. Attachment cache: SHA-256 verification + corruption rejection + 14-day TTL & LRU eviction
+        let tempCacheDir = FileManager.default.temporaryDirectory.appendingPathComponent("bul_cache_test_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempCacheDir) }
+
+        let cache = HrpBulletinAttachmentCache(
+            cacheDirectory: tempCacheDir,
+            maxAgeSeconds: 14 * 24 * 60 * 60,
+            maxBytes: 60
+        )
+        let validAtt = HrpBulletinAttachment(
+            id: "att_pdf_1",
+            kind: .pdf,
+            fileName: "huong-dan.pdf",
+            title: "Hướng dẫn chi tiết",
+            mimeType: "application/pdf",
+            url: "/api/bulletins/bul_1/attachments/att_pdf_1/content",
+            sha256: sampleSha
+        )
+        let fetchRes = await cache.fetchOrLoadAttachment(bulletinId: "bul_1", attachment: validAtt, httpClient: client)
+        let cachedUrl = try fetchRes.get()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cachedUrl.path))
+
+        // Corrupt sha256 expectation -> rejected
+        let badShaAtt = HrpBulletinAttachment(
+            id: "att_pdf_bad",
+            kind: .pdf,
+            fileName: "bad.pdf",
+            title: "Bad",
+            mimeType: "application/pdf",
+            url: "/api/bulletins/bul_1/attachments/att_pdf_1/content",
+            sha256: String(repeating: "0", count: 64)
+        )
+        let badRes = await cache.fetchOrLoadAttachment(bulletinId: "bul_1", attachment: badShaAtt, httpClient: client)
+        if case .success = badRes {
+            XCTFail("Expected SHA-256 mismatch to fail")
+        }
+
+        // Old file (> 14 days) pruned & LRU byte cap enforced
+        let oldFile = tempCacheDir.appendingPathComponent("expired.pdf")
+        try Data(repeating: 1, count: 25).write(to: oldFile)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-(15 * 24 * 60 * 60))], ofItemAtPath: oldFile.path)
+
+        let olderWithinTtl = tempCacheDir.appendingPathComponent("older_lru.pdf")
+        try Data(repeating: 2, count: 40).write(to: olderWithinTtl)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3600)], ofItemAtPath: olderWithinTtl.path)
+
+        cache.pruneCache()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldFile.path), "Expired >14 day file must be removed")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: olderWithinTtl.path), "Oldest LRU file exceeding maxBytes must be evicted")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cachedUrl.path), "Most recently used file must remain")
+
+        // 6. Logout resets badge to 0
+        await vm.performLogout()
+        XCTAssertEqual(reminderManager.lastSyncedAppBadgeCount, 0)
     }
 }

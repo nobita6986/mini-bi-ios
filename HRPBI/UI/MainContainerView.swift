@@ -121,7 +121,7 @@ public struct MainContainerView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(HrpPressableButtonStyle())
-                        .accessibilityLabel("Bản tin HRPartner")
+                        .accessibilityLabel(HrpBulletinContract.screenTitle)
                         .accessibilityIdentifier("topbar_bulletin_button")
 
                         // Task Reminder Bell with Enabled Count Badge (>= 40x44pt hit target)

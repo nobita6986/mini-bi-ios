@@ -3102,9 +3102,29 @@ public struct HrpBulletinItem: Identifiable, Codable, Equatable, Sendable {
     ]
 }
 
+public struct HrpBulletinListPage: Equatable, Sendable {
+    public let items: [HrpBulletinItem]
+    public let unreadCount: Int
+    public let nextCursor: String?
+    public let hasMore: Bool
+
+    public init(
+        items: [HrpBulletinItem] = [],
+        unreadCount: Int = 0,
+        nextCursor: String? = nil,
+        hasMore: Bool = false
+    ) {
+        self.items = items
+        self.unreadCount = max(0, unreadCount)
+        self.nextCursor = nextCursor
+        self.hasMore = hasMore
+    }
+}
+
 public enum HrpBulletinContract {
-    /// Locked false while waiting for T0-BI to open `/api/bulletins` on Backend.
-    public static let REMOTE_API_ENABLED: Bool = false
+    public static let REMOTE_API_ENABLED: Bool = true
+    public static let screenTitle: String = "Thông báo"
+    public static let markAllReadPath: String = "/api/bulletins/read-all"
     public static let readBulletinIdsStorageKey: String = "hrpbi.bulletin.read_ids.v1"
     public static let notifiedBulletinIdsStorageKey: String = "hrpbi.bulletin.notified_ids.v1"
     public static let notificationRequestPrefix: String = "hrp_bulletin_new_"
@@ -3116,6 +3136,16 @@ public enum HrpBulletinContract {
     ) -> String {
         var components = URLComponents()
         components.path = "/api/bulletins"
+        var queryItems = buildListQueryItems(category: category, pageSize: pageSize, cursor: cursor)
+        components.queryItems = queryItems
+        return components.string ?? "/api/bulletins"
+    }
+
+    public static func buildListQueryItems(
+        category: HrpBulletinCategory = .all,
+        pageSize: Int = 10,
+        cursor: String? = nil
+    ) -> [URLQueryItem] {
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "category", value: category.rawValue),
             URLQueryItem(name: "page_size", value: String(min(max(pageSize, 1), 50)))
@@ -3123,8 +3153,7 @@ public enum HrpBulletinContract {
         if let cursor = cursor?.trimmingCharacters(in: .whitespacesAndNewlines), !cursor.isEmpty {
             queryItems.append(URLQueryItem(name: "cursor", value: cursor))
         }
-        components.queryItems = queryItems
-        return components.string ?? "/api/bulletins"
+        return queryItems
     }
 
     public static func buildDetailPath(bulletinId: String) -> String {
@@ -3134,6 +3163,43 @@ public enum HrpBulletinContract {
 
     public static func buildMarkReadPath(bulletinId: String) -> String {
         "\(buildDetailPath(bulletinId: bulletinId))/read"
+    }
+
+    public static func buildAttachmentContentPath(bulletinId: String, attachmentId: String) -> String {
+        let encBulletin = bulletinId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? bulletinId
+        let encAttachment = attachmentId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? attachmentId
+        return "/api/bulletins/\(encBulletin)/attachments/\(encAttachment)/content"
+    }
+
+    public static func parseListResponse(_ root: [String: Any]) -> HrpBulletinListPage {
+        let dataObj = (root["data"] as? [String: Any]) ?? root
+        let dataArr = dataObj.optObjectArray("items", "bulletins")
+        let rawList = !dataArr.isEmpty ? dataArr : root.optObjectArray("items", "bulletins")
+        let items = rawList.compactMap { parseBulletinItem($0) }
+        let fallbackUnread = items.filter { !$0.isRead }.count
+        let unreadCount = dataObj.optNullableInt("unread_count", "unreadCount")
+            ?? root.optNullableInt("unread_count", "unreadCount")
+            ?? fallbackUnread
+        let rawCursor = dataObj.optNullableString("next_cursor", "nextCursor")
+            ?? root.optNullableString("next_cursor", "nextCursor")
+        let nextCursor = (rawCursor?.isEmpty == false) ? rawCursor : nil
+        let hasMore = dataObj.optBool("has_more", "hasMore", defaultValue: nextCursor != nil) && nextCursor != nil
+        return HrpBulletinListPage(
+            items: items,
+            unreadCount: unreadCount,
+            nextCursor: nextCursor,
+            hasMore: hasMore
+        )
+    }
+
+    public static func parseDetailResponse(_ root: [String: Any]) -> HrpBulletinItem? {
+        let dataObj = (root["data"] as? [String: Any]) ?? root
+        let candidate = (dataObj["bulletin"] as? [String: Any])
+            ?? (dataObj["item"] as? [String: Any])
+            ?? (root["bulletin"] as? [String: Any])
+            ?? (root["item"] as? [String: Any])
+            ?? dataObj
+        return parseBulletinItem(candidate)
     }
 
     public static func parseAttachment(_ dict: [String: Any]) -> HrpBulletinAttachment? {

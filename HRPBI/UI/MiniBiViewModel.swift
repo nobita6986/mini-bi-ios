@@ -56,9 +56,16 @@ public final class MiniBiViewModel: ObservableObject {
     @Published public var isTaskReminderSheetPresented: Bool = false
     @Published public var taskReminders: [TaskReminderItem] = []
     @Published public var isBulletinSheetPresented: Bool = false
-    @Published public var bulletinItems: [HrpBulletinItem] = HrpBulletinItem.defaultMockupItems
+    @Published public var bulletinItems: [HrpBulletinItem] = HrpBulletinContract.REMOTE_API_ENABLED ? [] : HrpBulletinItem.defaultMockupItems
     @Published public var selectedBulletinCategory: HrpBulletinCategory = .all
     @Published public var selectedBulletinDetailId: String? = nil
+    @Published public var selectedBulletinDetail: HrpBulletinItem? = nil
+    @Published public var bulletinUnreadTotal: Int = 0
+    @Published public var bulletinNextCursor: String? = nil
+    @Published public var bulletinHasMore: Bool = false
+    @Published public var isLoadingBulletins: Bool = false
+    @Published public var isLoadingMoreBulletins: Bool = false
+    @Published public var isLoadingBulletinDetail: Bool = false
     private var announcedNotificationIds: Set<Int64> = []
 
     public var enabledRemindersCount: Int {
@@ -77,7 +84,10 @@ public final class MiniBiViewModel: ObservableObject {
     }
 
     public var unreadBulletinCount: Int {
-        bulletinItems.filter { !$0.isRead }.count
+        if HrpBulletinContract.REMOTE_API_ENABLED {
+            return max(0, bulletinUnreadTotal)
+        }
+        return bulletinItems.filter { !$0.isRead }.count
     }
 
     // MARK: - Dashboard & CCCD Review State
@@ -507,10 +517,17 @@ public final class MiniBiViewModel: ObservableObject {
             }
         }
 
-        reloadBulletins()
+        if !HrpBulletinContract.REMOTE_API_ENABLED {
+            reloadBulletins()
+        }
     }
 
-    // MARK: - HRPartner Bulletin ("Bản tin HRPartner" — Local isRead + Notification Persistence + /api/bulletins Contract Gate)
+    // MARK: - HRPartner Bulletin ("Thông báo" — Live /api/bulletins* + App Icon Badge Sync)
+
+    public func syncBulletinAppBadge() {
+        let targetBadge = isAuthenticated ? unreadBulletinCount : 0
+        taskReminderManager.syncAppIconBadgeCount(targetBadge)
+    }
 
     private func loadPersistedReadBulletinIds() -> Set<String> {
         let arr = UserDefaults.standard.stringArray(forKey: HrpBulletinContract.readBulletinIdsStorageKey) ?? []
@@ -531,8 +548,8 @@ public final class MiniBiViewModel: ObservableObject {
     }
 
     public func reloadBulletins(notifyNewItems: Bool = false) {
-        let readIds = loadPersistedReadBulletinIds()
         if !HrpBulletinContract.REMOTE_API_ENABLED {
+            let readIds = loadPersistedReadBulletinIds()
             bulletinItems = HrpBulletinItem.defaultMockupItems.map { item in
                 var copy = item
                 if readIds.contains(copy.id) {
@@ -540,9 +557,143 @@ public final class MiniBiViewModel: ObservableObject {
                 }
                 return copy
             }
+            bulletinUnreadTotal = bulletinItems.filter { !$0.isRead }.count
+            syncBulletinAppBadge()
+            if notifyNewItems {
+                _ = notifyUnannouncedBulletinsIfNeeded(postSystemNotification: true)
+            }
+            return
         }
+        Task { [weak self] in
+            await self?.loadBulletins(reset: true, notifyNewItems: notifyNewItems)
+        }
+    }
+
+    public func loadBulletins(
+        category: HrpBulletinCategory? = nil,
+        reset: Bool = true,
+        notifyNewItems: Bool = false
+    ) async {
+        guard HrpBulletinContract.REMOTE_API_ENABLED else {
+            reloadBulletins(notifyNewItems: notifyNewItems)
+            return
+        }
+        guard isAuthenticated, let token = captureSessionToken() else {
+            bulletinItems = []
+            bulletinUnreadTotal = 0
+            bulletinNextCursor = nil
+            bulletinHasMore = false
+            syncBulletinAppBadge()
+            return
+        }
+
+        let targetCategory = category ?? selectedBulletinCategory
+        let cursorToSend: String? = reset ? nil : bulletinNextCursor
+        if !reset && (cursorToSend == nil || !bulletinHasMore || isLoadingBulletins || isLoadingMoreBulletins) {
+            return
+        }
+
+        if reset {
+            isLoadingBulletins = true
+        } else {
+            isLoadingMoreBulletins = true
+        }
+        defer {
+            if isSessionValid(token) {
+                isLoadingBulletins = false
+                isLoadingMoreBulletins = false
+            }
+        }
+
+        let response = await repository.httpClient.request(
+            method: "GET",
+            path: "/api/bulletins",
+            queryItems: HrpBulletinContract.buildListQueryItems(
+                category: targetCategory,
+                pageSize: 10,
+                cursor: cursorToSend
+            )
+        )
+        guard !Task.isCancelled, isSessionValid(token) else { return }
+
+        if response.statusCode == 404 {
+            if reset {
+                bulletinItems = []
+            }
+            bulletinUnreadTotal = 0
+            bulletinNextCursor = nil
+            bulletinHasMore = false
+            syncBulletinAppBadge()
+            return
+        }
+
+        guard response.isSuccess, let root = response.jsonObject else {
+            return
+        }
+
+        let page = HrpBulletinContract.parseListResponse(root)
+        if reset {
+            bulletinItems = page.items
+        } else {
+            let existingIds = Set(bulletinItems.map(\.id))
+            let newItems = page.items.filter { !existingIds.contains($0.id) }
+            bulletinItems.append(contentsOf: newItems)
+        }
+        bulletinUnreadTotal = page.unreadCount
+        bulletinNextCursor = page.nextCursor
+        bulletinHasMore = page.hasMore
+        syncBulletinAppBadge()
+
         if notifyNewItems {
             _ = notifyUnannouncedBulletinsIfNeeded(postSystemNotification: true)
+        }
+    }
+
+    public func loadMoreBulletins() async {
+        await loadBulletins(category: selectedBulletinCategory, reset: false, notifyNewItems: false)
+    }
+
+    public func selectBulletinCategory(_ category: HrpBulletinCategory) async {
+        selectedBulletinCategory = category
+        guard HrpBulletinContract.REMOTE_API_ENABLED else { return }
+        await loadBulletins(category: category, reset: true, notifyNewItems: false)
+    }
+
+    public func loadBulletinDetail(bulletinId: String) async {
+        let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+        if let localMatch = bulletinItems.first(where: { $0.id == cleanId }) {
+            selectedBulletinDetail = localMatch
+        }
+        guard HrpBulletinContract.REMOTE_API_ENABLED, isAuthenticated, let token = captureSessionToken() else {
+            return
+        }
+
+        isLoadingBulletinDetail = true
+        defer {
+            if isSessionValid(token) {
+                isLoadingBulletinDetail = false
+            }
+        }
+
+        let response = await repository.httpClient.request(
+            method: "GET",
+            path: HrpBulletinContract.buildDetailPath(bulletinId: cleanId),
+            queryItems: []
+        )
+        guard !Task.isCancelled, isSessionValid(token), response.isSuccess, let root = response.jsonObject else {
+            return
+        }
+        if var parsed = HrpBulletinContract.parseDetailResponse(root) {
+            if let idx = bulletinItems.firstIndex(where: { $0.id == cleanId }) {
+                if bulletinItems[idx].isRead {
+                    parsed.isRead = true
+                }
+                bulletinItems[idx] = parsed
+            }
+            if selectedBulletinDetailId == cleanId {
+                selectedBulletinDetail = parsed
+            }
         }
     }
 
@@ -551,7 +702,8 @@ public final class MiniBiViewModel: ObservableObject {
     @discardableResult
     public func notifyUnannouncedBulletinsIfNeeded(postSystemNotification: Bool = false) -> [HrpBulletinItem] {
         var notifiedIds = loadPersistedNotifiedBulletinIds()
-        let readIds = loadPersistedReadBulletinIds()
+        let useRemote = HrpBulletinContract.REMOTE_API_ENABLED
+        let readIds = useRemote ? Set<String>() : loadPersistedReadBulletinIds()
         var newlyDiscovered: [HrpBulletinItem] = []
 
         for item in bulletinItems where !item.isRead && !readIds.contains(item.id) && !notifiedIds.contains(item.id) {
@@ -563,53 +715,147 @@ public final class MiniBiViewModel: ObservableObject {
             savePersistedNotifiedBulletinIds(notifiedIds)
             if let latest = newlyDiscovered.first {
                 if postSystemNotification {
-                    taskReminderManager.postBulletinSystemNotification(bulletin: latest, delaySeconds: 1.0)
+                    taskReminderManager.postBulletinSystemNotification(
+                        bulletin: latest,
+                        unreadCount: max(1, unreadBulletinCount),
+                        delaySeconds: 1.0
+                    )
                 }
-                showBanner("Bản tin HRPartner mới: \(latest.title)", isError: false)
+                showBanner("Thông báo mới: \(latest.title)", isError: false)
             }
         }
         return newlyDiscovered
     }
 
-    /// Opens the HRPartner Bulletin sheet and navigates directly to the specified bulletin detail (if matched).
+    /// Opens the Bulletin sheet and navigates directly to the specified bulletin detail (if matched).
     public func openBulletinFromNotification(bulletinId: String) {
         let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
-        reloadBulletins(notifyNewItems: false)
         selectedBulletinCategory = .all
-        if !cleanId.isEmpty, bulletinItems.contains(where: { $0.id == cleanId }) {
-            markBulletinRead(cleanId)
+        if !cleanId.isEmpty {
             selectedBulletinDetailId = cleanId
+            isBulletinSheetPresented = true
+            if HrpBulletinContract.REMOTE_API_ENABLED {
+                Task { [weak self] in
+                    guard let self else { return }
+                    await self.loadBulletins(category: .all, reset: true, notifyNewItems: false)
+                    await self.loadBulletinDetail(bulletinId: cleanId)
+                    await self.markBulletinReadAsync(cleanId)
+                }
+            } else {
+                reloadBulletins(notifyNewItems: false)
+                if bulletinItems.contains(where: { $0.id == cleanId }) {
+                    markBulletinRead(cleanId)
+                }
+            }
         } else {
             selectedBulletinDetailId = nil
+            isBulletinSheetPresented = true
+            if HrpBulletinContract.REMOTE_API_ENABLED {
+                Task { [weak self] in
+                    await self?.loadBulletins(category: .all, reset: true, notifyNewItems: false)
+                }
+            }
         }
-        isBulletinSheetPresented = true
     }
 
-    /// Fires a sample iOS system notification for the latest HRPartner bulletin so UAT can verify banner + deep-link behavior.
+    /// Fires a sample iOS system notification for testing banner + deep-link behavior.
     public func triggerSampleBulletinNotification(bulletin: HrpBulletinItem? = nil) {
         guard let target = bulletin ?? bulletinItems.first else { return }
-        taskReminderManager.postBulletinSystemNotification(bulletin: target, delaySeconds: 1.5)
-        showBanner("Đã gửi thông báo Bản tin: \(target.title)", isError: false)
+        taskReminderManager.postBulletinSystemNotification(
+            bulletin: target,
+            unreadCount: max(1, unreadBulletinCount),
+            delaySeconds: 1.5
+        )
+        showBanner("Đã gửi thông báo: \(target.title)", isError: false)
     }
 
     public func markBulletinRead(_ bulletinId: String) {
         let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanId.isEmpty else { return }
-        var readIds = loadPersistedReadBulletinIds()
-        readIds.insert(cleanId)
-        savePersistedReadBulletinIds(readIds)
+        applyLocalMarkBulletinRead(cleanId)
+        if HrpBulletinContract.REMOTE_API_ENABLED && isAuthenticated {
+            Task { [weak self] in
+                await self?.postMarkBulletinRead(cleanId)
+            }
+        }
+    }
+
+    public func markBulletinReadAsync(_ bulletinId: String) async {
+        let cleanId = bulletinId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+        applyLocalMarkBulletinRead(cleanId)
+        if HrpBulletinContract.REMOTE_API_ENABLED && isAuthenticated {
+            await postMarkBulletinRead(cleanId)
+        }
+    }
+
+    private func applyLocalMarkBulletinRead(_ cleanId: String) {
+        var wasUnread = false
+        for idx in bulletinItems.indices where bulletinItems[idx].id == cleanId {
+            if !bulletinItems[idx].isRead {
+                wasUnread = true
+            }
+            bulletinItems[idx].isRead = true
+        }
+        if var detail = selectedBulletinDetail, detail.id == cleanId {
+            if !detail.isRead {
+                wasUnread = true
+            }
+            detail.isRead = true
+            selectedBulletinDetail = detail
+        }
+
+        if !HrpBulletinContract.REMOTE_API_ENABLED {
+            var readIds = loadPersistedReadBulletinIds()
+            readIds.insert(cleanId)
+            savePersistedReadBulletinIds(readIds)
+        } else if wasUnread {
+            bulletinUnreadTotal = max(0, bulletinUnreadTotal - 1)
+        }
 
         var notifiedIds = loadPersistedNotifiedBulletinIds()
         if notifiedIds.insert(cleanId).inserted {
             savePersistedNotifiedBulletinIds(notifiedIds)
         }
+        syncBulletinAppBadge()
+    }
 
-        for idx in bulletinItems.indices where bulletinItems[idx].id == cleanId {
-            bulletinItems[idx].isRead = true
+    private func postMarkBulletinRead(_ cleanId: String) async {
+        guard let token = captureSessionToken() else { return }
+        let response = await repository.httpClient.request(
+            method: "POST",
+            path: HrpBulletinContract.buildMarkReadPath(bulletinId: cleanId),
+            queryItems: [],
+            jsonBody: [String: Any]()
+        )
+        guard !Task.isCancelled, isSessionValid(token), response.isSuccess, let root = response.jsonObject else {
+            return
+        }
+        let dataObj = (root["data"] as? [String: Any]) ?? root
+        if let serverUnread = dataObj.optNullableInt("unread_count", "unreadCount")
+            ?? root.optNullableInt("unread_count", "unreadCount") {
+            bulletinUnreadTotal = max(0, serverUnread)
+            syncBulletinAppBadge()
         }
     }
 
     public func markAllBulletinsRead() {
+        applyLocalMarkAllBulletinsRead()
+        if HrpBulletinContract.REMOTE_API_ENABLED && isAuthenticated {
+            Task { [weak self] in
+                await self?.postMarkAllBulletinsRead()
+            }
+        }
+    }
+
+    public func markAllBulletinsReadAsync() async {
+        applyLocalMarkAllBulletinsRead()
+        if HrpBulletinContract.REMOTE_API_ENABLED && isAuthenticated {
+            await postMarkAllBulletinsRead()
+        }
+    }
+
+    private func applyLocalMarkAllBulletinsRead() {
         var readIds = loadPersistedReadBulletinIds()
         var notifiedIds = loadPersistedNotifiedBulletinIds()
         for idx in bulletinItems.indices {
@@ -617,16 +863,49 @@ public final class MiniBiViewModel: ObservableObject {
             notifiedIds.insert(bulletinItems[idx].id)
             bulletinItems[idx].isRead = true
         }
-        savePersistedReadBulletinIds(readIds)
+        if var detail = selectedBulletinDetail {
+            detail.isRead = true
+            selectedBulletinDetail = detail
+        }
+        if !HrpBulletinContract.REMOTE_API_ENABLED {
+            savePersistedReadBulletinIds(readIds)
+        }
         savePersistedNotifiedBulletinIds(notifiedIds)
+        bulletinUnreadTotal = 0
+        syncBulletinAppBadge()
+    }
+
+    private func postMarkAllBulletinsRead() async {
+        guard let token = captureSessionToken() else { return }
+        let response = await repository.httpClient.request(
+            method: "POST",
+            path: HrpBulletinContract.markAllReadPath,
+            queryItems: [],
+            jsonBody: [String: Any]()
+        )
+        guard !Task.isCancelled, isSessionValid(token), response.isSuccess else {
+            return
+        }
+        let dataObj = (response.jsonObject?["data"] as? [String: Any]) ?? response.jsonObject
+        let serverUnread = dataObj?.optNullableInt("unread_count", "unreadCount") ?? 0
+        bulletinUnreadTotal = max(0, serverUnread)
+        syncBulletinAppBadge()
     }
 
     public func resetBulletinReadStateForTesting() {
         UserDefaults.standard.removeObject(forKey: HrpBulletinContract.readBulletinIdsStorageKey)
         UserDefaults.standard.removeObject(forKey: HrpBulletinContract.notifiedBulletinIdsStorageKey)
         selectedBulletinDetailId = nil
+        selectedBulletinDetail = nil
         isBulletinSheetPresented = false
-        bulletinItems = HrpBulletinItem.defaultMockupItems
+        bulletinNextCursor = nil
+        bulletinHasMore = false
+        isLoadingBulletins = false
+        isLoadingMoreBulletins = false
+        isLoadingBulletinDetail = false
+        bulletinItems = HrpBulletinContract.REMOTE_API_ENABLED ? [] : HrpBulletinItem.defaultMockupItems
+        bulletinUnreadTotal = HrpBulletinContract.REMOTE_API_ENABLED ? 0 : bulletinItems.filter { !$0.isRead }.count
+        taskReminderManager.syncAppIconBadgeCount(0)
     }
 
     // MARK: - Local Task Reminders ("Nhắc việc")
@@ -985,6 +1264,17 @@ public final class MiniBiViewModel: ObservableObject {
         isLoadingMoreMyExplanations = false
         isLoadingMoreExplanationInbox = false
         resetRecruitmentPostsState()
+        isBulletinSheetPresented = false
+        selectedBulletinCategory = .all
+        selectedBulletinDetailId = nil
+        selectedBulletinDetail = nil
+        bulletinItems = HrpBulletinContract.REMOTE_API_ENABLED ? [] : HrpBulletinItem.defaultMockupItems
+        bulletinUnreadTotal = 0
+        bulletinNextCursor = nil
+        bulletinHasMore = false
+        isLoadingBulletins = false
+        isLoadingMoreBulletins = false
+        isLoadingBulletinDetail = false
         if clearDraftRows {
             newWorkerDraftRows = [NewWorkerEntryDraft()]
         }
@@ -1072,7 +1362,9 @@ public final class MiniBiViewModel: ObservableObject {
                         let typeUpper = incomingItem.type.uppercased()
                         let routeLower = (incomingItem.targetRoute ?? "").lowercased()
                         if typeUpper.contains("BULLETIN") || routeLower.contains("bulletin") {
-                            self.reloadBulletins(notifyNewItems: true)
+                            Task { [weak self] in
+                                await self?.loadBulletins(reset: true, notifyNewItems: true)
+                            }
                         } else if !incomingItem.isRead {
                             self.showBanner("Thông báo mới: \(incomingItem.title)", isError: false)
                         }
@@ -1090,6 +1382,10 @@ public final class MiniBiViewModel: ObservableObject {
             guard let self, self.isSessionValid(token) else { return }
             await self.refreshNotifications()
             guard self.isSessionValid(token) else { return }
+            if HrpBulletinContract.REMOTE_API_ENABLED {
+                await self.loadBulletins(category: .all, reset: true, notifyNewItems: true)
+                guard self.isSessionValid(token) else { return }
+            }
             switch initialDest {
             case .attendance:
                 await self.loadInitialAttendanceScreenDataIfNeeded()
@@ -1125,6 +1421,7 @@ public final class MiniBiViewModel: ObservableObject {
         hasExplicitDestinationOverride = false
         currentDestination = .attendance
         resetSessionScopedState(clearDraftRows: true)
+        syncBulletinAppBadge()
         await repository.logout()
         timeAnchorManager.clearAnchor()
         attendanceTimeEvaluation = timeAnchorManager.evaluateAnchor()
@@ -1847,13 +2144,26 @@ public final class MiniBiViewModel: ObservableObject {
     }
 
     @discardableResult
-    public func applyScannedCccdQr(rowId: String, rawQr: String) -> Bool {
-        guard let parsed = CccdQrDecoder.parse(rawQr),
-              let idx = newWorkerDraftRows.firstIndex(where: { $0.rowId == rowId }) else {
+    public func applyScannedCccdQr(rowId: String, rawQr: String, onlyEmptyFields: Bool = false) -> Bool {
+        guard let parsed = CccdQrDecoder.parse(rawQr) else {
             return false
         }
-        newWorkerDraftRows[idx] = CccdQrDecoder.applyToDraft(newWorkerDraftRows[idx], qrData: parsed)
-        showBanner("Đã điền tự động CCCD: \(parsed.soCccd) - \(parsed.hoTen)")
+        return applyDecodedCccdData(rowId: rowId, data: parsed, onlyEmptyFields: onlyEmptyFields)
+    }
+
+    @discardableResult
+    public func applyDecodedCccdData(rowId: String, data: CccdQrData, onlyEmptyFields: Bool = false) -> Bool {
+        guard let idx = newWorkerDraftRows.firstIndex(where: { $0.rowId == rowId }) else {
+            return false
+        }
+        let before = newWorkerDraftRows[idx]
+        let updated = CccdQrDecoder.applyToDraft(before, qrData: data, onlyEmptyFields: onlyEmptyFields)
+        guard updated != before else {
+            return false
+        }
+        newWorkerDraftRows[idx] = updated
+        let summaryName = updated.hoTen.isEmpty ? data.soCccd : "\(data.soCccd) - \(updated.hoTen)"
+        showBanner("Đã điền tự động CCCD: \(summaryName)")
         return true
     }
 

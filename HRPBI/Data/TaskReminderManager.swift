@@ -1,5 +1,6 @@
 import AudioToolbox
 import Foundation
+import UIKit
 import UserNotifications
 
 public enum TaskReminderRepeatMode: String, Codable, CaseIterable, Equatable {
@@ -105,6 +106,7 @@ public final class TaskReminderManager: ObservableObject {
     public var nowProvider: () -> Date
 
     @Published public private(set) var reminders: [TaskReminderItem] = []
+    @Published public private(set) var lastSyncedAppBadgeCount: Int = 0
     public var onRemindersChanged: (([TaskReminderItem]) -> Void)?
 
     public init(
@@ -437,11 +439,47 @@ public final class TaskReminderManager: ObservableObject {
         center.removeDeliveredNotifications(withIdentifiers: [requestId])
     }
 
+    public func syncAppIconBadgeCount(_ unreadCount: Int) {
+        let safeCount = max(0, unreadCount)
+        lastSyncedAppBadgeCount = safeCount
+        guard scheduleSystemNotifications else { return }
+
+        let center = UNUserNotificationCenter.current()
+        if #available(iOS 16.0, *) {
+            center.setBadgeCount(safeCount, withCompletionHandler: nil)
+        } else {
+            DispatchQueue.main.async {
+                UIApplication.shared.applicationIconBadgeNumber = safeCount
+            }
+        }
+
+        if safeCount == 0 {
+            center.getDeliveredNotifications { delivered in
+                let bulletinIds = delivered
+                    .map(\.request.identifier)
+                    .filter { $0.hasPrefix(HrpBulletinContract.notificationRequestPrefix) }
+                if !bulletinIds.isEmpty {
+                    center.removeDeliveredNotifications(withIdentifiers: bulletinIds)
+                }
+            }
+            center.getPendingNotificationRequests { pending in
+                let bulletinIds = pending
+                    .map(\.identifier)
+                    .filter { $0.hasPrefix(HrpBulletinContract.notificationRequestPrefix) }
+                if !bulletinIds.isEmpty {
+                    center.removePendingNotificationRequests(withIdentifiers: bulletinIds)
+                }
+            }
+        }
+    }
+
     public func postBulletinSystemNotification(
         bulletin: HrpBulletinItem,
+        unreadCount: Int = 1,
         delaySeconds: TimeInterval = 1.0
     ) {
         guard scheduleSystemNotifications else { return }
+        let safeBadge = max(1, unreadCount)
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
@@ -449,10 +487,11 @@ public final class TaskReminderManager: ObservableObject {
             center.removePendingNotificationRequests(withIdentifiers: [requestId])
 
             let content = UNMutableNotificationContent()
-            content.title = "Bản tin HRPartner · \(bulletin.categoryDisplay)"
+            content.title = "Thông báo · \(bulletin.categoryDisplay)"
             content.subtitle = bulletin.title
             content.body = bulletin.summary
             content.sound = .default
+            content.badge = NSNumber(value: safeBadge)
             content.userInfo = [
                 "bulletin_id": bulletin.id,
                 "type": "HR_BULLETIN"
@@ -493,7 +532,7 @@ public final class TaskReminderNotificationDelegate: NSObject, UNUserNotificatio
                 }
             }
         }
-        completionHandler([.banner, .list, .sound])
+        completionHandler([.banner, .list, .sound, .badge])
     }
 
     public func userNotificationCenter(

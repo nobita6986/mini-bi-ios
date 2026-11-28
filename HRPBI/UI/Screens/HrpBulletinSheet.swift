@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import PDFKit
+import CryptoKit
 
 // MARK: - Mockup Media Generator (2-Page PDF via UIGraphicsPDFRenderer + Infographic Image via UIGraphicsImageRenderer)
 
@@ -429,7 +430,237 @@ public enum HrpBulletinMockupMediaGenerator {
     }
 }
 
-// MARK: - HRPartner Bulletin Sheet (Bản tin HRPartner)
+// MARK: - Attachment Cache (SHA-256 Verification + 14-Day TTL / 50 MB LRU Pruning)
+
+public final class HrpBulletinAttachmentCache: @unchecked Sendable {
+    public static let shared = HrpBulletinAttachmentCache()
+    public static let maxCacheAgeSeconds: TimeInterval = 14 * 24 * 60 * 60
+    public static let maxCacheBytes: Int64 = 50 * 1024 * 1024
+
+    public enum CacheError: LocalizedError {
+        case invalidPath
+        case downloadFailed(String)
+        case emptyPayload
+        case sha256Mismatch
+        case writeFailed
+
+        public var errorDescription: String? {
+            switch self {
+            case .invalidPath:
+                return "Đường dẫn tệp đính kèm không hợp lệ."
+            case .downloadFailed(let msg):
+                return msg
+            case .emptyPayload:
+                return "Tệp đính kèm trống hoặc không khả dụng."
+            case .sha256Mismatch:
+                return "Tệp đính kèm không khớp mã kiểm tra toàn vẹn (SHA-256)."
+            case .writeFailed:
+                return "Không thể lưu tệp đính kèm vào bộ nhớ đệm."
+            }
+        }
+    }
+
+    public let cacheDirectory: URL
+    public let maxAgeSeconds: TimeInterval
+    public let maxBytes: Int64
+    private let fileManager = FileManager.default
+    private let lock = NSLock()
+
+    public init(
+        cacheDirectory: URL? = nil,
+        maxAgeSeconds: TimeInterval = HrpBulletinAttachmentCache.maxCacheAgeSeconds,
+        maxBytes: Int64 = HrpBulletinAttachmentCache.maxCacheBytes
+    ) {
+        if let cacheDirectory {
+            self.cacheDirectory = cacheDirectory
+        } else {
+            let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+                ?? FileManager.default.temporaryDirectory
+            self.cacheDirectory = base.appendingPathComponent("hrpbi_bulletin_attachments", isDirectory: true)
+        }
+        self.maxAgeSeconds = maxAgeSeconds
+        self.maxBytes = maxBytes
+        try? fileManager.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
+    }
+
+    public static func sha256Hex(of data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    public static func verifySha256(data: Data, expectedHex: String?) -> Bool {
+        let clean = (expectedHex ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !clean.isEmpty else { return true }
+        return sha256Hex(of: data) == clean
+    }
+
+    public static func resolveDownloadPath(bulletinId: String, attachment: HrpBulletinAttachment) -> String {
+        let raw = attachment.url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !raw.isEmpty {
+            if raw.hasPrefix("/"),
+               let comps = URLComponents(string: raw),
+               !comps.path.isEmpty {
+                return comps.path
+            }
+            if let url = URL(string: raw),
+               url.scheme != nil,
+               !url.path.isEmpty {
+                return url.path
+            }
+        }
+        return HrpBulletinContract.buildAttachmentContentPath(bulletinId: bulletinId, attachmentId: attachment.id)
+    }
+
+    public func fileUrl(for attachment: HrpBulletinAttachment) -> URL {
+        let safeId = Self.sanitizeFileToken(attachment.id)
+        let ext = Self.fileExtension(for: attachment)
+        return cacheDirectory.appendingPathComponent("\(safeId).\(ext)")
+    }
+
+    public func cachedFileUrl(for attachment: HrpBulletinAttachment, now: Date = Date()) -> URL? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let target = fileUrl(for: attachment)
+        guard fileManager.fileExists(atPath: target.path) else {
+            return nil
+        }
+
+        if let attrs = try? fileManager.attributesOfItem(atPath: target.path),
+           let modDate = attrs[.modificationDate] as? Date,
+           now.timeIntervalSince(modDate) > maxAgeSeconds {
+            try? fileManager.removeItem(at: target)
+            return nil
+        }
+
+        guard let data = try? Data(contentsOf: target), !data.isEmpty else {
+            try? fileManager.removeItem(at: target)
+            return nil
+        }
+
+        guard Self.verifySha256(data: data, expectedHex: attachment.sha256) else {
+            try? fileManager.removeItem(at: target)
+            return nil
+        }
+
+        try? fileManager.setAttributes([.modificationDate: now], ofItemAtPath: target.path)
+        return target
+    }
+
+    public func fetchOrLoadAttachment(
+        bulletinId: String,
+        attachment: HrpBulletinAttachment,
+        httpClient: BackendHttpClient = .shared
+    ) async -> Result<URL, Error> {
+        if let existing = cachedFileUrl(for: attachment) {
+            return .success(existing)
+        }
+
+        let path = Self.resolveDownloadPath(bulletinId: bulletinId, attachment: attachment)
+        guard !path.isEmpty else {
+            return .failure(CacheError.invalidPath)
+        }
+
+        let response = await httpClient.fetchBinaryData(path: path, useCache: false)
+        guard response.isSuccess else {
+            return .failure(CacheError.downloadFailed(response.errorMessage ?? "Không thể tải tệp đính kèm."))
+        }
+        let data = response.rawData
+        guard !data.isEmpty else {
+            return .failure(CacheError.emptyPayload)
+        }
+        guard Self.verifySha256(data: data, expectedHex: attachment.sha256) else {
+            return .failure(CacheError.sha256Mismatch)
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        try? fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        let target = fileUrl(for: attachment)
+        do {
+            try data.write(to: target, options: .atomic)
+            try? fileManager.setAttributes([.modificationDate: Date()], ofItemAtPath: target.path)
+        } catch {
+            return .failure(CacheError.writeFailed)
+        }
+
+        pruneCacheLocked(now: Date())
+        return .success(target)
+    }
+
+    public func pruneCache(now: Date = Date()) {
+        lock.lock()
+        defer { lock.unlock() }
+        pruneCacheLocked(now: now)
+    }
+
+    private func pruneCacheLocked(now: Date) {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: cacheDirectory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        struct Entry {
+            let url: URL
+            let size: Int64
+            let modDate: Date
+        }
+
+        var kept: [Entry] = []
+        var totalSize: Int64 = 0
+
+        for url in urls {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)),
+                  values.isRegularFile == true else {
+                continue
+            }
+            let modDate = values.contentModificationDate ?? Date.distantPast
+            if now.timeIntervalSince(modDate) > maxAgeSeconds {
+                try? fileManager.removeItem(at: url)
+                continue
+            }
+            let size = Int64(values.fileSize ?? 0)
+            kept.append(Entry(url: url, size: size, modDate: modDate))
+            totalSize += size
+        }
+
+        if totalSize > maxBytes {
+            let oldestFirst = kept.sorted { $0.modDate < $1.modDate }
+            for entry in oldestFirst {
+                guard totalSize > maxBytes else { break }
+                try? fileManager.removeItem(at: entry.url)
+                totalSize -= entry.size
+            }
+        }
+    }
+
+    private static func sanitizeFileToken(_ raw: String) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+        let mapped = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let cleaned = String(mapped)
+        return cleaned.isEmpty ? "att" : cleaned
+    }
+
+    private static func fileExtension(for attachment: HrpBulletinAttachment) -> String {
+        let nameExt = URL(fileURLWithPath: attachment.fileName).pathExtension.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !nameExt.isEmpty && nameExt.count <= 6 {
+            return nameExt
+        }
+        if attachment.kind == .pdf || attachment.mimeType.lowercased().contains("pdf") {
+            return "pdf"
+        }
+        if attachment.mimeType.lowercased().contains("png") {
+            return "png"
+        }
+        return "jpg"
+    }
+}
+
+// MARK: - Bulletin Sheet ("Thông báo")
 
 private struct BulletinPreviewImageSelection: Identifiable {
     let id: String
@@ -449,6 +680,9 @@ public struct HrpBulletinSheet: View {
     @State private var selectedBulletinId: String? = nil
     @State private var activeImagePreview: BulletinPreviewImageSelection? = nil
     @State private var activePdfPreview: BulletinPreviewPdfSelection? = nil
+    @State private var loadedImagesByAttachmentId: [String: UIImage] = [:]
+    @State private var loadingAttachmentIds: Set<String> = []
+    @State private var attachmentErrorsById: [String: String] = [:]
 
     public init(viewModel: MiniBiViewModel) {
         self.viewModel = viewModel
@@ -456,6 +690,9 @@ public struct HrpBulletinSheet: View {
 
     private var selectedItem: HrpBulletinItem? {
         guard let id = selectedBulletinId else { return nil }
+        if let detail = viewModel.selectedBulletinDetail, detail.id == id {
+            return detail
+        }
         return viewModel.bulletinItems.first(where: { $0.id == id })
     }
 
@@ -477,7 +714,7 @@ public struct HrpBulletinSheet: View {
             }
             .animation(.spring(response: 0.3, dampingFraction: 0.86), value: selectedBulletinId)
             .background(theme.background.ignoresSafeArea())
-            .navigationTitle("Bản tin HRPartner")
+            .navigationTitle(HrpBulletinContract.screenTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -487,6 +724,7 @@ public struct HrpBulletinSheet: View {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
                                 selectedBulletinId = nil
                                 viewModel.selectedBulletinDetailId = nil
+                                viewModel.selectedBulletinDetail = nil
                             }
                         } label: {
                             HStack(spacing: 4) {
@@ -515,6 +753,14 @@ public struct HrpBulletinSheet: View {
             .onAppear {
                 if let targetId = viewModel.selectedBulletinDetailId, !targetId.isEmpty {
                     selectedBulletinId = targetId
+                }
+                if HrpBulletinContract.REMOTE_API_ENABLED {
+                    Task {
+                        await viewModel.loadBulletins(reset: true, notifyNewItems: false)
+                        if let targetId = viewModel.selectedBulletinDetailId, !targetId.isEmpty {
+                            await viewModel.loadBulletinDetail(bulletinId: targetId)
+                        }
+                    }
                 }
             }
             .onChange(of: viewModel.selectedBulletinDetailId) { newId in
@@ -551,6 +797,9 @@ public struct HrpBulletinSheet: View {
                                 withAnimation(.easeOut(duration: 0.18)) {
                                     viewModel.selectedBulletinCategory = category
                                 }
+                                if HrpBulletinContract.REMOTE_API_ENABLED {
+                                    Task { await viewModel.selectBulletinCategory(category) }
+                                }
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: category.iconName)
@@ -576,7 +825,7 @@ public struct HrpBulletinSheet: View {
                     .padding(.vertical, 2)
                 }
 
-                // Mockup Preview Notice Banner + Test New Bulletin Notification Button
+                // Mockup Preview Notice Banner (hidden in live API mode)
                 if !HrpBulletinContract.REMOTE_API_ENABLED {
                     HStack(alignment: .center, spacing: 8) {
                         Image(systemName: "sparkles")
@@ -619,12 +868,22 @@ public struct HrpBulletinSheet: View {
                 }
 
                 let items = viewModel.filteredBulletinItems
-                if items.isEmpty {
+                if viewModel.isLoadingBulletins && items.isEmpty {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("Đang tải thông báo...")
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(SemanticColors.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 32)
+                    .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
+                } else if items.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "newspaper")
                             .font(.system(size: 34))
                             .foregroundColor(theme.primary.opacity(0.6))
-                        Text("Chưa có bản tin nào trong mục này.")
+                        Text("Chưa có thông báo nào trong mục này.")
                             .font(.subheadline.weight(.semibold))
                             .foregroundColor(SemanticColors.textPrimary)
                     }
@@ -635,9 +894,30 @@ public struct HrpBulletinSheet: View {
                     ForEach(items) { item in
                         bulletinRowCard(item: item, theme: theme)
                     }
+
+                    if viewModel.bulletinHasMore {
+                        HrpLoadMoreButton(
+                            title: "Tải thêm thông báo",
+                            loadedCount: items.count,
+                            totalCount: nil,
+                            isLoading: viewModel.isLoadingMoreBulletins,
+                            theme: theme
+                        ) {
+                            Task { await viewModel.loadMoreBulletins() }
+                        }
+                    }
                 }
             }
             .padding(14)
+        }
+        .refreshable {
+            await viewModel.performRefreshable {
+                await viewModel.loadBulletins(
+                    category: viewModel.selectedBulletinCategory,
+                    reset: true,
+                    notifyNewItems: false
+                )
+            }
         }
     }
 
@@ -647,8 +927,12 @@ public struct HrpBulletinSheet: View {
         return Button {
             HapticsManager.selection()
             viewModel.markBulletinRead(item.id)
+            viewModel.selectedBulletinDetailId = item.id
             withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
                 selectedBulletinId = item.id
+            }
+            if HrpBulletinContract.REMOTE_API_ENABLED {
+                Task { await viewModel.loadBulletinDetail(bulletinId: item.id) }
             }
         } label: {
             VStack(alignment: .leading, spacing: 10) {
@@ -831,6 +1115,17 @@ public struct HrpBulletinSheet: View {
                         .foregroundColor(SemanticColors.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
 
+                    if viewModel.isLoadingBulletinDetail && item.contentSections.isEmpty {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.85)
+                            Text("Đang tải chi tiết...")
+                                .font(.caption)
+                                .foregroundColor(SemanticColors.textSecondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+
                     VStack(alignment: .leading, spacing: 10) {
                         ForEach(Array(item.contentSections.enumerated()), id: \.offset) { _, paragraph in
                             Text(paragraph)
@@ -866,8 +1161,17 @@ public struct HrpBulletinSheet: View {
                         }
 
                         ForEach(item.imageAttachments) { attachment in
-                            let uiImage = HrpBulletinMockupMediaGenerator.sampleImage(for: attachment, bulletin: item)
+                            let remoteImage = loadedImagesByAttachmentId[attachment.id]
+                            let mockupImage = HrpBulletinContract.REMOTE_API_ENABLED
+                                ? nil
+                                : HrpBulletinMockupMediaGenerator.sampleImage(for: attachment, bulletin: item)
+                            let displayImage = remoteImage ?? mockupImage
+
                             Button {
+                                guard let uiImage = displayImage else {
+                                    Task { await loadRemoteImageAttachment(bulletinId: item.id, attachment: attachment) }
+                                    return
+                                }
                                 HapticsManager.selection()
                                 activeImagePreview = BulletinPreviewImageSelection(
                                     id: attachment.id,
@@ -876,28 +1180,56 @@ public struct HrpBulletinSheet: View {
                                 )
                             } label: {
                                 VStack(alignment: .leading, spacing: 8) {
-                                    ZStack(alignment: .bottomTrailing) {
-                                        Image(uiImage: uiImage)
-                                            .resizable()
-                                            .scaledToFit()
-                                            .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous)
-                                                    .stroke(SemanticColors.borderSubtle, lineWidth: 0.8)
-                                            )
+                                    if let uiImage = displayImage {
+                                        ZStack(alignment: .bottomTrailing) {
+                                            Image(uiImage: uiImage)
+                                                .resizable()
+                                                .scaledToFit()
+                                                .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous)
+                                                        .stroke(SemanticColors.borderSubtle, lineWidth: 0.8)
+                                                )
 
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                                .font(.system(size: 10, weight: .bold))
-                                            Text("Phóng to")
-                                                .font(.caption2.weight(.bold))
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                                    .font(.system(size: 10, weight: .bold))
+                                                Text("Phóng to")
+                                                    .font(.caption2.weight(.bold))
+                                            }
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color.black.opacity(0.68))
+                                            .foregroundColor(.white)
+                                            .clipShape(Capsule())
+                                            .padding(8)
                                         }
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(Color.black.opacity(0.68))
-                                        .foregroundColor(.white)
-                                        .clipShape(Capsule())
-                                        .padding(8)
+                                    } else if let err = attachmentErrorsById[attachment.id] {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: "exclamationmark.triangle.fill")
+                                                .foregroundColor(SemanticColors.dangerText)
+                                            Text(err)
+                                                .font(.caption2)
+                                                .foregroundColor(SemanticColors.dangerText)
+                                            Spacer()
+                                            Text("Thử lại")
+                                                .font(.caption2.weight(.bold))
+                                                .foregroundColor(theme.primary)
+                                        }
+                                        .padding(12)
+                                        .background(SemanticColors.dangerBg)
+                                        .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous))
+                                    } else {
+                                        HStack(spacing: 8) {
+                                            ProgressView()
+                                                .scaleEffect(0.85)
+                                            Text("Đang tải ảnh...")
+                                                .font(.caption)
+                                                .foregroundColor(SemanticColors.textSecondary)
+                                        }
+                                        .frame(maxWidth: .infinity, minHeight: 110)
+                                        .background(SemanticColors.surfaceMuted)
+                                        .clipShape(RoundedRectangle(cornerRadius: HrpDesignTokens.radiusMD, style: .continuous))
                                     }
 
                                     HStack {
@@ -915,13 +1247,18 @@ public struct HrpBulletinSheet: View {
                                 }
                             }
                             .buttonStyle(HrpPressableButtonStyle())
+                            .task(id: "\(item.id)_\(attachment.id)") {
+                                if HrpBulletinContract.REMOTE_API_ENABLED {
+                                    await loadRemoteImageAttachment(bulletinId: item.id, attachment: attachment)
+                                }
+                            }
                         }
                     }
                     .padding(14)
                     .hrpCardSurface(cornerRadius: HrpDesignTokens.radiusCard)
                 }
 
-                // PDF Attachments Section (Tap to open Native PDFKit 2-Page Reader)
+                // PDF Attachments Section (Tap to open Native PDFKit Multi-Page Reader)
                 if !item.pdfAttachments.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 6) {
@@ -935,57 +1272,76 @@ public struct HrpBulletinSheet: View {
                         }
 
                         ForEach(item.pdfAttachments) { attachment in
-                            let pdfUrl = HrpBulletinMockupMediaGenerator.samplePdfUrl(for: attachment, bulletin: item)
+                            let isDownloading = loadingAttachmentIds.contains(attachment.id)
                             Button {
                                 HapticsManager.selection()
-                                activePdfPreview = BulletinPreviewPdfSelection(
-                                    id: attachment.id,
-                                    attachment: attachment,
-                                    fileUrl: pdfUrl
-                                )
-                            } label: {
-                                HStack(alignment: .center, spacing: 12) {
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .fill(Color(hex: 0xDC2626).opacity(0.12))
-                                            .frame(width: 44, height: 44)
-                                        Image(systemName: "doc.text.fill")
-                                            .font(.system(size: 20, weight: .semibold))
-                                            .foregroundColor(Color(hex: 0xDC2626))
-                                    }
-
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(attachment.title)
-                                            .font(.caption.weight(.bold))
-                                            .foregroundColor(SemanticColors.textPrimary)
-                                            .multilineTextAlignment(.leading)
-                                            .fixedSize(horizontal: false, vertical: true)
-
-                                        Text(attachment.fileName)
-                                            .font(.caption2)
-                                            .foregroundColor(SemanticColors.textSecondary)
-                                            .lineLimit(1)
-
-                                        Text(attachment.metadataSubtitle)
-                                            .font(.caption2.weight(.semibold).monospacedDigit())
-                                            .foregroundColor(Color(hex: 0xDC2626))
-                                    }
-
-                                    Spacer(minLength: 6)
-
-                                    HStack(spacing: 4) {
-                                        Text("Đọc PDF")
-                                            .font(.caption.weight(.bold))
-                                        Image(systemName: "arrow.up.right.square.fill")
-                                            .font(.caption.weight(.bold))
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 7)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: HrpDesignTokens.radiusXS, style: .continuous)
-                                            .fill(theme.primary)
+                                if HrpBulletinContract.REMOTE_API_ENABLED {
+                                    Task { await openRemotePdfAttachment(bulletinId: item.id, attachment: attachment) }
+                                } else {
+                                    let pdfUrl = HrpBulletinMockupMediaGenerator.samplePdfUrl(for: attachment, bulletin: item)
+                                    activePdfPreview = BulletinPreviewPdfSelection(
+                                        id: attachment.id,
+                                        attachment: attachment,
+                                        fileUrl: pdfUrl
                                     )
-                                    .foregroundColor(.white)
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .center, spacing: 12) {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .fill(Color(hex: 0xDC2626).opacity(0.12))
+                                                .frame(width: 44, height: 44)
+                                            Image(systemName: "doc.text.fill")
+                                                .font(.system(size: 20, weight: .semibold))
+                                                .foregroundColor(Color(hex: 0xDC2626))
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(attachment.title)
+                                                .font(.caption.weight(.bold))
+                                                .foregroundColor(SemanticColors.textPrimary)
+                                                .multilineTextAlignment(.leading)
+                                                .fixedSize(horizontal: false, vertical: true)
+
+                                            Text(attachment.fileName)
+                                                .font(.caption2)
+                                                .foregroundColor(SemanticColors.textSecondary)
+                                                .lineLimit(1)
+
+                                            Text(attachment.metadataSubtitle)
+                                                .font(.caption2.weight(.semibold).monospacedDigit())
+                                                .foregroundColor(Color(hex: 0xDC2626))
+                                        }
+
+                                        Spacer(minLength: 6)
+
+                                        HStack(spacing: 4) {
+                                            if isDownloading {
+                                                ProgressView()
+                                                    .tint(.white)
+                                                    .scaleEffect(0.75)
+                                            } else {
+                                                Text("Đọc PDF")
+                                                    .font(.caption.weight(.bold))
+                                                Image(systemName: "arrow.up.right.square.fill")
+                                                    .font(.caption.weight(.bold))
+                                            }
+                                        }
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 7)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: HrpDesignTokens.radiusXS, style: .continuous)
+                                                .fill(theme.primary)
+                                        )
+                                        .foregroundColor(.white)
+                                    }
+
+                                    if let err = attachmentErrorsById[attachment.id] {
+                                        Text(err)
+                                            .font(.caption2)
+                                            .foregroundColor(SemanticColors.dangerText)
+                                    }
                                 }
                                 .padding(12)
                                 .background(
@@ -998,6 +1354,7 @@ public struct HrpBulletinSheet: View {
                                 )
                             }
                             .buttonStyle(HrpPressableButtonStyle())
+                            .disabled(isDownloading)
                         }
                     }
                     .padding(14)
@@ -1005,6 +1362,53 @@ public struct HrpBulletinSheet: View {
                 }
             }
             .padding(14)
+        }
+    }
+
+    private func loadRemoteImageAttachment(bulletinId: String, attachment: HrpBulletinAttachment) async {
+        guard loadedImagesByAttachmentId[attachment.id] == nil,
+              !loadingAttachmentIds.contains(attachment.id) else {
+            return
+        }
+        loadingAttachmentIds.insert(attachment.id)
+        attachmentErrorsById[attachment.id] = nil
+        let result = await HrpBulletinAttachmentCache.shared.fetchOrLoadAttachment(
+            bulletinId: bulletinId,
+            attachment: attachment,
+            httpClient: viewModel.repository.httpClient
+        )
+        loadingAttachmentIds.remove(attachment.id)
+        switch result {
+        case .success(let fileUrl):
+            if let data = try? Data(contentsOf: fileUrl), let uiImg = UIImage(data: data) {
+                loadedImagesByAttachmentId[attachment.id] = uiImg
+            } else {
+                attachmentErrorsById[attachment.id] = "Không thể giải mã tệp ảnh."
+            }
+        case .failure(let error):
+            attachmentErrorsById[attachment.id] = error.localizedDescription
+        }
+    }
+
+    private func openRemotePdfAttachment(bulletinId: String, attachment: HrpBulletinAttachment) async {
+        guard !loadingAttachmentIds.contains(attachment.id) else { return }
+        loadingAttachmentIds.insert(attachment.id)
+        attachmentErrorsById[attachment.id] = nil
+        let result = await HrpBulletinAttachmentCache.shared.fetchOrLoadAttachment(
+            bulletinId: bulletinId,
+            attachment: attachment,
+            httpClient: viewModel.repository.httpClient
+        )
+        loadingAttachmentIds.remove(attachment.id)
+        switch result {
+        case .success(let fileUrl):
+            activePdfPreview = BulletinPreviewPdfSelection(
+                id: attachment.id,
+                attachment: attachment,
+                fileUrl: fileUrl
+            )
+        case .failure(let error):
+            attachmentErrorsById[attachment.id] = error.localizedDescription
         }
     }
 
