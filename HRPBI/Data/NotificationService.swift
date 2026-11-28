@@ -656,6 +656,7 @@ public final class MiniBiRepository {
         search: String = "",
         project: String = "",
         status: String = "",
+        providerType: String = "",
         manager: String = "",
         recruiter: String = "",
         cursor: String? = nil,
@@ -690,6 +691,10 @@ public final class MiniBiRepository {
         let cleanStatus = status.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         if ["ON", "OFF", "UNCONFIRMED"].contains(cleanStatus) {
             queryItems.append(URLQueryItem(name: "employment_status", value: cleanStatus))
+        }
+        let cleanProviderType = providerType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ["hrp_direct", "hrp_ctv", "vendor"].contains(cleanProviderType) {
+            queryItems.append(URLQueryItem(name: "provider_type", value: cleanProviderType))
         }
 
         let response = await httpClient.request(
@@ -1228,8 +1233,31 @@ public final class MiniBiRepository {
         let teamDisplay = teamObj?.optString("display", "display_name", "name")
             ?? recruiterObj?.optString("team_display_name", "team_display")
             ?? obj.optString("nhom", "team_name", "team_display")
-        let providerType = recruiterObj?.optString("provider_type", "providerType")
-            ?? obj.optString("provider_type", "providerType", "nguon_tuyen")
+        let providerType = (recruiterObj?.optString("provider_type", "providerType") ?? "")
+            .ifEmpty(obj.optString("provider_type", "providerType", "nguon_tuyen"))
+        let collaboratorObj = obj["collaborator"] as? [String: Any]
+        let rawCollaboratorId = obj.optNullableString("collaborator_id", "collaboratorId")
+            ?? collaboratorObj?.optNullableString("collaborator_id", "id")
+        let collaboratorId: String? = {
+            guard let cid = rawCollaboratorId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !cid.isEmpty,
+                  cid != "__system_vendor__" else {
+                return nil
+            }
+            return cid
+        }()
+        let rawCollaboratorDisplay = obj.optNullableString("collaborator_display_name", "collaboratorDisplayName", "collaborator_name")
+            ?? collaboratorObj?.optNullableString("display_name", "name")
+        let collaboratorDisplayName: String? = {
+            if let disp = rawCollaboratorDisplay?.trimmingCharacters(in: .whitespacesAndNewlines), !disp.isEmpty {
+                return disp
+            }
+            if let collaboratorId,
+               let matched = catalog.catalogCollaborators.first(where: { $0.collaboratorId == collaboratorId }) {
+                return matched.displayName
+            }
+            return nil
+        }()
 
         return WorkerItem(
             maNld: entryId,
@@ -1271,7 +1299,9 @@ public final class MiniBiRepository {
             employmentStatusCode: cleanStatusCode,
             employmentEffectiveDate: offDate,
             teamId: teamId,
-            providerType: providerType
+            providerType: providerType,
+            collaboratorId: collaboratorId,
+            collaboratorDisplayName: collaboratorDisplayName
         )
     }
 }
