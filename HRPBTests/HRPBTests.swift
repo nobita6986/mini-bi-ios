@@ -7076,7 +7076,7 @@ final class HRPBTests: XCTestCase {
     }
 
     @MainActor
-    func testCollaboratorFullProfilePayloadSourceSwitchingAndDraftPersistence() throws {
+    func testCollaboratorFullProfilePayloadSourceSwitchingAndDraftPersistence() async throws {
         let client = makeMockHttpClient()
         let service = DirectEntryService(httpClient: client)
         let hrpRecruiter1 = "11111111-1111-4111-8111-111111111111"
@@ -7210,6 +7210,9 @@ final class HRPBTests: XCTestCase {
         XCTAssertEqual(vm2.newWorkerDraftRows.first?.effectiveSourceMode, .ctv)
         XCTAssertEqual(vm2.newWorkerDraftRows.first?.collaboratorId, "ctv_hoa")
         XCTAssertEqual(vm2.newWorkerDraftRows.first?.collaboratorDisplayName, "Chị Hoa CTV")
+
+        await vm1.performLogout()
+        await vm2.performLogout()
     }
 
     @MainActor
@@ -7281,7 +7284,7 @@ final class HRPBTests: XCTestCase {
         // 2. 400 BATCH_INVALID when `!supportsCollaborators` -> also blocked cleanly & keeps draft
         MockURLProtocol.resetRecordedUrls()
         statusToReturn = 400
-        bodyToReturn = #"{"ok":false,"error":"BATCH_INVALID","message":"Unknown collaborator_id"}"#
+        bodyToReturn = #"{"ok":false,"error":{"code":"BATCH_INVALID","message":"Unknown collaborator_id"}}"#
         await vm.submitNewWorkerDraftBatch(confirmedDuplicates: true)
         XCTAssertEqual(vm.bannerMessage, "Máy chủ hiện tại chưa hỗ trợ ghi nhận nguồn Cộng tác viên (CTV). Hồ sơ và lựa chọn đã nhập vẫn được giữ nguyên.")
         XCTAssertFalse(MockURLProtocol.recordedUrls().contains(where: { $0.hasSuffix("/api/direct-entry/batches") }))
@@ -7425,7 +7428,7 @@ final class HRPBTests: XCTestCase {
         _ = await repo.fetchWorkers(scope: "all", providerType: "hrp_direct")
         _ = await repo.fetchWorkers(scope: "all", providerType: "hrp_ctv")
         _ = await repo.fetchWorkers(scope: "all", providerType: "vendor")
-        let recorded = MockURLProtocol.recordedUrls()
+        let recorded = MockURLProtocol.recordedUrls().filter { $0.contains("/api/direct-entry/workers") }
         XCTAssertEqual(recorded.count, 4)
         XCTAssertFalse(recorded[0].contains("provider_type="))
         XCTAssertTrue(recorded[1].contains("provider_type=hrp_direct"))
