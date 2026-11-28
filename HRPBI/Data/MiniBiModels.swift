@@ -3173,10 +3173,8 @@ public enum HrpBulletinContract {
 
     public static func parseListResponse(_ root: [String: Any]) -> HrpBulletinListPage {
         let dataObj = (root["data"] as? [String: Any]) ?? root
-        let rawList = dataObj.optObjectArray("items")
-            .ifEmpty(dataObj.optObjectArray("bulletins"))
-            .ifEmpty(root.optObjectArray("items"))
-            .ifEmpty(root.optObjectArray("bulletins"))
+        let dataArr = dataObj.optObjectArray("items", "bulletins")
+        let rawList = !dataArr.isEmpty ? dataArr : root.optObjectArray("items", "bulletins")
         let items = rawList.compactMap { parseBulletinItem($0) }
         let fallbackUnread = items.filter { !$0.isRead }.count
         let unreadCount = dataObj.optNullableInt("unread_count", "unreadCount")
